@@ -40,32 +40,29 @@ const auth = credentials
     });
 
 // ─── Constantes de tamaño ────────────────────────────────────────────────────
-// Tamaño del retrato: 3.5 cm ancho × 4.5 cm alto (formato carnet)
-const PHOTO_W_EMU = Math.round((3.5 / 2.54) * 914400); // ≈ 1,260,000 EMU
-const PHOTO_H_EMU = Math.round((4.5 / 2.54) * 914400); // ≈ 1,620,000 EMU
-const FACE_W_PX = 400;
-const FACE_H_PX = 515;
+// Foto en slide: 70px ≈ ~1.85cm. En EMU: 1.85cm / 2.54 * 914400
+const PHOTO_CM = 1.85;
+const PHOTO_EMU = Math.round((PHOTO_CM / 2.54) * 914400);
+const FACE_PX = 500; // resolución interna alta para buena calidad
 
 // ─── Almacén temporal de imágenes en memoria ─────────────────────────────────
 const tempImages = new Map();
 
 // ─── Recorte de rostro desde carnet chileno ──────────────────────────────────
-// La foto del carnet está en el lado izquierdo, entre ~5-40% del ancho
-// y ~15-75% del alto. Extraemos esa zona y luego recortamos con "attention".
 async function cropFaceFromCarnet(imageBuffer) {
   const meta = await sharp(imageBuffer, { failOn: "none" }).metadata();
   const w = meta.width;
   const h = meta.height;
 
-  // Zona donde está la foto en un carnet chileno (lado izquierdo)
-  const cropLeft = Math.round(w * 0.03);
-  const cropTop = Math.round(h * 0.15);
-  const cropWidth = Math.round(w * 0.35);
-  const cropHeight = Math.round(h * 0.65);
+  // Zona ajustada: solo la cara, sin letras ni números
+  // Borde izquierdo 8%, borde derecho ~28% (ancho 20%), arriba 20%, alto 40%
+  const cropLeft = Math.round(w * 0.08);
+  const cropTop = Math.round(h * 0.20);
+  const cropWidth = Math.round(w * 0.20);
+  const cropHeight = Math.round(h * 0.40);
 
-  console.log(`📐 Imagen original: ${w}×${h}px, recortando zona izquierda: ${cropWidth}×${cropHeight}px`);
+  console.log(`📐 Imagen original: ${w}×${h}px, recortando cara: ${cropWidth}×${cropHeight}px desde (${cropLeft},${cropTop})`);
 
-  // Paso 1: extraer la zona del carnet donde está la foto
   const faceRegion = await sharp(imageBuffer, { failOn: "none" })
     .extract({
       left: cropLeft,
@@ -75,10 +72,10 @@ async function cropFaceFromCarnet(imageBuffer) {
     })
     .toBuffer();
 
-  // Paso 2: usar "attention" en la zona recortada para centrar la cara
+  // Redimensionar a cuadrado con buena resolución
   const processedImage = await sharp(faceRegion)
-    .resize(FACE_W_PX, FACE_H_PX, { fit: "cover", position: "attention" })
-    .jpeg({ quality: 92 })
+    .resize(FACE_PX, FACE_PX, { fit: "cover", position: "attention" })
+    .jpeg({ quality: 95 })
     .toBuffer();
 
   return processedImage;
@@ -181,7 +178,7 @@ app.post("/insert-photo", async (req, res) => {
 
     // ── 2. Recortar rostro del carnet ──────────────────────────────────────
     const processedImage = await cropFaceFromCarnet(imageBuffer);
-    console.log(`✂️  Rostro recortado a ${FACE_W_PX}×${FACE_H_PX}px`);
+    console.log(`✂️  Rostro recortado a ${FACE_PX}×${FACE_PX}px`);
 
     // ── 3. Servir imagen temporalmente desde este servidor ─────────────────
     const imageId = crypto.randomUUID();
@@ -193,7 +190,7 @@ app.post("/insert-photo", async (req, res) => {
     const publicImageUrl = `${baseUrl}/tmp/${imageId}.jpg`;
     console.log(`🌐 Imagen disponible en: ${publicImageUrl}`);
 
-    // ── 4. Obtener el slide e identificar el cuadro gris ───────────────────
+    // ── 4. Buscar el placeholder gris (Shape 82) en el slide ──────────────
     const authClient = await auth.getClient();
     const slides = google.slides({ version: "v1", auth: authClient });
     const presentation = await slides.presentations.get({
@@ -208,6 +205,16 @@ app.post("/insert-photo", async (req, res) => {
       for (const element of slide.pageElements || []) {
         if (!element.shape) continue;
 
+        // Buscar por objectId exacto primero
+        if (element.objectId === "g1f522768429_2_82") {
+          grayBoxId = element.objectId;
+          grayBoxTransform = element.transform;
+          slideObjectId = slide.objectId;
+          console.log(`🔲 Placeholder encontrado por ID: ${grayBoxId}`);
+          break;
+        }
+
+        // Fallback: buscar por color gris (#BFBFBF = 191,191,191)
         const fill =
           element.shape.shapeProperties?.shapeBackgroundFill?.solidFill;
         if (!fill?.color?.rgbColor) continue;
@@ -227,7 +234,7 @@ app.post("/insert-photo", async (req, res) => {
           grayBoxId = element.objectId;
           grayBoxTransform = element.transform;
           slideObjectId = slide.objectId;
-          console.log(`🔲 Cuadro gris: ${grayBoxId} (RGB: ${r},${g},${b})`);
+          console.log(`🔲 Cuadro gris encontrado: ${grayBoxId} (RGB: ${r},${g},${b})`);
           break;
         }
       }
@@ -237,11 +244,11 @@ app.post("/insert-photo", async (req, res) => {
     if (!grayBoxId) {
       tempImages.delete(imageId);
       return res.status(404).json({
-        error: "No se encontró un cuadro gris en la presentación.",
+        error: "No se encontró el placeholder gris en la presentación.",
       });
     }
 
-    // ── 5. Insertar imagen y eliminar cuadro gris ──────────────────────────
+    // ── 5. Insertar imagen (70×70 en slide) y eliminar placeholder ────────
     await slides.presentations.batchUpdate({
       presentationId: presentation_id,
       requestBody: {
@@ -252,8 +259,8 @@ app.post("/insert-photo", async (req, res) => {
               elementProperties: {
                 pageObjectId: slideObjectId,
                 size: {
-                  width: { magnitude: PHOTO_W_EMU, unit: "EMU" },
-                  height: { magnitude: PHOTO_H_EMU, unit: "EMU" },
+                  width: { magnitude: PHOTO_EMU, unit: "EMU" },
+                  height: { magnitude: PHOTO_EMU, unit: "EMU" },
                 },
                 transform: grayBoxTransform,
               },
@@ -266,7 +273,7 @@ app.post("/insert-photo", async (req, res) => {
       },
     });
 
-    console.log(`✅ Foto insertada en la presentación ${presentation_id}`);
+    console.log(`✅ Foto insertada (${PHOTO_CM}cm × ${PHOTO_CM}cm) en ${presentation_id}`);
 
     // ── 6. Limpiar imagen temporal (60s de gracia) ─────────────────────────
     setTimeout(() => {
