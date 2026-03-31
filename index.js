@@ -567,13 +567,13 @@ app.post("/webhook/generate-vt", async (req, res) => {
     const fileName = `${data.id || "VT"}-VT-${data.nombre}.pdf`;
     console.log(`✅ PDF generado: ${fileName} (${finalPdf.length} bytes)`);
 
-    // 5. Servir PDF temporalmente (para descarga directa)
+    // 5. Guardar PDF en disco (sobrevive redeploys)
     const pdfId = crypto.randomUUID();
-    tempImages.set(pdfId, finalPdf);
-    setTimeout(() => {
-      tempImages.delete(pdfId);
-      console.log(`🗑️  PDF temporal eliminado: ${pdfId}`);
-    }, 86_400_000); // 24 horas
+    const tmpDir = path.join(__dirname, "tmp-pdfs");
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
+    const pdfFilePath = path.join(tmpDir, `${pdfId}.pdf`);
+    fs.writeFileSync(pdfFilePath, finalPdf);
+    console.log(`💾 PDF guardado en disco: ${pdfFilePath}`);
 
     const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
@@ -595,15 +595,15 @@ app.post("/webhook/generate-vt", async (req, res) => {
   }
 });
 
-// Servir PDFs temporales
+// Servir PDFs desde disco
 app.get("/tmp/:id.pdf", (req, res) => {
-  const pdfBuffer = tempImages.get(req.params.id);
-  if (!pdfBuffer) {
+  const pdfFilePath = path.join(__dirname, "tmp-pdfs", `${req.params.id}.pdf`);
+  if (!fs.existsSync(pdfFilePath)) {
     return res.status(404).send("PDF no encontrado o expirado");
   }
   res.set("Content-Type", "application/pdf");
   res.set("Content-Disposition", "inline");
-  res.send(pdfBuffer);
+  res.sendFile(pdfFilePath);
 });
 
 // ─── Arranque del servidor ───────────────────────────────────────────────────
