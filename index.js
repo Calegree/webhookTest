@@ -557,13 +557,13 @@ app.post("/webhook/generate-vt", async (req, res) => {
     const fileName = `${data.id || "VT"}-VT-${data.nombre}.pdf`;
     console.log(`✅ PDF generado: ${fileName} (${finalPdf.length} bytes)`);
 
-    // 5. Guardar PDF en disco (sobrevive redeploys)
+    // 5. Guardar PDF en disco
     const pdfId = crypto.randomUUID();
-    tempImages.set(pdfId, finalPdf);
-    setTimeout(() => {
-      tempImages.delete(pdfId);
-      console.log(`🗑️  PDF temporal eliminado: ${pdfId}`);
-    }, 300_000); // 5 min
+    const tmpDir = path.join(__dirname, "tmp-pdfs");
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
+    const pdfFilePath = path.join(tmpDir, `${pdfId}.pdf`);
+    fs.writeFileSync(pdfFilePath, finalPdf);
+    console.log(`💾 PDF guardado en disco: ${pdfFilePath}`);
 
     const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
