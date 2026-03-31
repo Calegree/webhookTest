@@ -3,7 +3,7 @@ const express = require("express");
 const axios = require("axios");
 const sharp = require("sharp");
 const { google } = require("googleapis");
-const { Readable } = require("stream");
+const crypto = require("crypto");
 const path = require("path");
 
 const app = express();
@@ -16,8 +16,6 @@ const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || "One Page";
 const AIRTABLE_PHOTO_FIELD = process.env.AIRTABLE_PHOTO_FIELD || "Foto";
 
 // ─── Autenticación con Service Account ───────────────────────────────────────
-// En producción (Railway) usa la variable de entorno GOOGLE_CREDENTIALS
-// En local usa el archivo credentials.json
 let credentials;
 if (process.env.GOOGLE_CREDENTIALS) {
   credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
@@ -42,37 +40,32 @@ const auth = credentials
     });
 
 // ─── Constantes de tamaño ────────────────────────────────────────────────────
-// 2.8 cm en EMU (English Metric Units): 1 inch = 914400 EMU, 1 inch = 2.54 cm
-const CM_2_8_IN_EMU = Math.round((2.8 / 2.54) * 914400); // ≈ 1,007,874 EMU
-// Para procesado interno usamos 330px (equivale a 2.8cm @ ~300dpi)
+const CM_2_8_IN_EMU = Math.round((2.8 / 2.54) * 914400);
 const FACE_PX = 330;
+
+// ─── Almacén temporal de imágenes en memoria ─────────────────────────────────
+const tempImages = new Map();
 
 // ─── Healthcheck ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.send("🚀 Webhook Transearch — Inserción de fotos en Google Slides activo");
+  res.send("Webhook Transearch — Inserción de fotos en Google Slides activo");
+});
+
+// ─── Servir imágenes temporales ──────────────────────────────────────────────
+app.get("/tmp/:id.jpg", (req, res) => {
+  const imageBuffer = tempImages.get(req.params.id);
+  if (!imageBuffer) {
+    return res.status(404).send("Imagen no encontrada o expirada");
+  }
+  res.set("Content-Type", "image/jpeg");
+  res.send(imageBuffer);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /insert-photo
-//
-// Body JSON:
-//   { "presentation_id": "...", "record_id": "..." }
-//   O bien:
-//   { "presentation_id": "...", "image_url": "..." }
-//
-// Flujo:
-//   0. Si no hay image_url, busca la foto en Airtable usando record_id
-//   1. Descarga la imagen
-//   2. Sharp → redimensiona a cuadrado 2.8×2.8 cm
-//   3. Sube imagen procesada a Google Drive (pública temporalmente)
-//   4. Google Slides API → detecta el primer rectángulo gris del slide
-//   5. Crea la imagen en esa posición y elimina el rectángulo gris
-//   6. Elimina el archivo temporal de Drive (60s de gracia)
-//   7. Retorna { success: true, presentation_id }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/insert-photo", async (req, res) => {
   console.log("📦 Body recibido:", JSON.stringify(req.body, null, 2));
-  // Zapier puede enviar keys con espacios o anidar en "data"
   const raw = req.body.data || req.body;
   const body = {};
   for (const [k, v] of Object.entries(raw)) {
@@ -80,7 +73,6 @@ app.post("/insert-photo", async (req, res) => {
   }
   let { image_url, presentation_id, record_id } = body;
 
-  // Validación de entrada
   if (!presentation_id) {
     return res.status(400).json({
       error: "Falta parámetro requerido: presentation_id",
@@ -89,12 +81,11 @@ app.post("/insert-photo", async (req, res) => {
 
   if (!image_url && !record_id) {
     return res.status(400).json({
-      error:
-        "Falta parámetro requerido: image_url o record_id (para buscar foto en Airtable)",
+      error: "Falta parámetro requerido: image_url o record_id",
     });
   }
 
-  // ── 0. Si no hay image_url, obtenerla desde Airtable ────────────────────
+  // ── 0. Obtener image_url desde Airtable si no viene ─────────────────────
   if (!image_url) {
     console.log(`🔍 Buscando foto en Airtable para registro: ${record_id}`);
     try {
@@ -111,7 +102,6 @@ app.post("/insert-photo", async (req, res) => {
         });
       }
 
-      // Buscar el primer attachment que sea imagen directa
       const imageAttachment = photoField.find((att) =>
         att.type && att.type.startsWith("image/")
       );
@@ -119,20 +109,18 @@ app.post("/insert-photo", async (req, res) => {
       if (imageAttachment) {
         image_url = imageAttachment.url;
       } else {
-        // Es PDF u otro formato — usar thumbnail de Airtable (mayor resolución disponible)
         const att = photoField[0];
-        const thumbUrl = att.thumbnails?.full?.url
-          || att.thumbnails?.large?.url;
+        const thumbUrl = att.thumbnails?.full?.url || att.thumbnails?.large?.url;
         if (thumbUrl) {
           image_url = thumbUrl;
           console.log(`📎 Archivo es ${att.type}, usando thumbnail de Airtable`);
         } else {
           return res.status(422).json({
-            error: `El archivo en "${AIRTABLE_PHOTO_FIELD}" es ${att.type} y no tiene thumbnails disponibles. Sube una imagen JPG/PNG o un PDF con contenido visual.`,
+            error: `El archivo es ${att.type} y no tiene thumbnails. Sube JPG/PNG o PDF.`,
           });
         }
       }
-      console.log(`📸 URL de foto obtenida desde Airtable: ${image_url}`);
+      console.log(`📸 URL de foto: ${image_url}`);
     } catch (err) {
       console.error("❌ Error consultando Airtable:", err.message);
       return res.status(502).json({
@@ -142,11 +130,8 @@ app.post("/insert-photo", async (req, res) => {
     }
   }
 
-  let driveFileId = null;
-
   try {
-    console.log(`\n📥 Nueva solicitud — presentación: ${presentation_id}`);
-    console.log(`🔗 URL imagen: ${image_url}`);
+    console.log(`📥 Presentación: ${presentation_id}`);
 
     // ── 1. Descargar imagen ────────────────────────────────────────────────
     const imageResponse = await axios.get(image_url, {
@@ -154,14 +139,9 @@ app.post("/insert-photo", async (req, res) => {
       timeout: 15000,
     });
     const imageBuffer = Buffer.from(imageResponse.data);
-    const contentType = imageResponse.headers["content-type"] || "unknown";
-    console.log(`✅ Imagen descargada (${imageBuffer.length} bytes, tipo: ${contentType})`);
+    console.log(`✅ Imagen descargada (${imageBuffer.length} bytes)`);
 
-    // ── 2. Subir imagen a Google Drive (para que Slides pueda leerla) ─────
-    const authClient = await auth.getClient();
-    const drive = google.drive({ version: "v3", auth: authClient });
-
-    // Redimensionar a cuadrado
+    // ── 2. Redimensionar a cuadrado ────────────────────────────────────────
     const processedImage = await sharp(imageBuffer, { failOn: "none" })
       .resize(FACE_PX, FACE_PX, { fit: "cover", position: "centre" })
       .jpeg({ quality: 92 })
@@ -169,48 +149,26 @@ app.post("/insert-photo", async (req, res) => {
 
     console.log(`✂️  Imagen redimensionada a ${FACE_PX}×${FACE_PX}px`);
 
-    // Subir a la misma carpeta de la presentación en Drive
-    const presentationFile = await drive.files.get({
-      fileId: presentation_id,
-      fields: "parents",
-    });
-    const parentFolder = presentationFile.data.parents?.[0];
+    // ── 3. Servir imagen temporalmente desde este servidor ─────────────────
+    const imageId = crypto.randomUUID();
+    tempImages.set(imageId, processedImage);
 
-    const uploadParams = {
-      requestBody: {
-        name: `foto-candidato-${Date.now()}.jpg`,
-        mimeType: "image/jpeg",
-        ...(parentFolder && { parents: [parentFolder] }),
-      },
-      media: {
-        mimeType: "image/jpeg",
-        body: Readable.from(processedImage),
-      },
-      fields: "id",
-    };
-
-    const driveResponse = await drive.files.create(uploadParams);
-    driveFileId = driveResponse.data.id;
-
-    // Hacer el archivo público (necesario para que Slides API lo lea)
-    await drive.permissions.create({
-      fileId: driveFileId,
-      requestBody: { role: "reader", type: "anyone" },
-    });
-
-    const publicImageUrl = `https://drive.google.com/uc?export=view&id=${driveFileId}`;
-    console.log(`☁️  Imagen subida a Drive: ${driveFileId}`);
+    // Determinar URL pública
+    const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : (process.env.PUBLIC_URL || `http://localhost:${PORT}`);
+    const publicImageUrl = `${baseUrl}/tmp/${imageId}.jpg`;
+    console.log(`🌐 Imagen disponible en: ${publicImageUrl}`);
 
     // ── 4. Obtener el slide e identificar el cuadro gris ───────────────────
+    const authClient = await auth.getClient();
     const slides = google.slides({ version: "v1", auth: authClient });
     const presentation = await slides.presentations.get({
       presentationId: presentation_id,
     });
 
-    // Busca en TODOS los slides el primer rectángulo con relleno gris
     let grayBoxId = null;
     let grayBoxTransform = null;
-    let grayBoxSize = null;
     let slideObjectId = null;
 
     for (const slide of presentation.data.slides || []) {
@@ -225,7 +183,6 @@ app.post("/insert-photo", async (req, res) => {
         const g = Math.round((fill.color.rgbColor.green || 0) * 255);
         const b = Math.round((fill.color.rgbColor.blue || 0) * 255);
 
-        // Relleno gris: canales similares entre sí y en rango medio (80–220)
         const isGray =
           Math.abs(r - g) < 35 &&
           Math.abs(g - b) < 35 &&
@@ -236,11 +193,8 @@ app.post("/insert-photo", async (req, res) => {
         if (isGray) {
           grayBoxId = element.objectId;
           grayBoxTransform = element.transform;
-          grayBoxSize = element.size;
           slideObjectId = slide.objectId;
-          console.log(
-            `🔲 Cuadro gris encontrado: ${grayBoxId} (RGB: ${r},${g},${b})`
-          );
+          console.log(`🔲 Cuadro gris: ${grayBoxId} (RGB: ${r},${g},${b})`);
           break;
         }
       }
@@ -248,14 +202,13 @@ app.post("/insert-photo", async (req, res) => {
     }
 
     if (!grayBoxId) {
+      tempImages.delete(imageId);
       return res.status(404).json({
-        error:
-          "No se encontró un cuadro gris en la presentación. Asegúrate de que el template tiene un rectángulo de color gris como placeholder de la foto.",
+        error: "No se encontró un cuadro gris en la presentación.",
       });
     }
 
-    // ── 5. Insertar imagen en el slide y eliminar cuadro gris ──────────────
-    // Forzamos tamaño 2.8×2.8 cm en EMU, manteniendo la posición del cuadro gris
+    // ── 5. Insertar imagen y eliminar cuadro gris ──────────────────────────
     await slides.presentations.batchUpdate({
       presentationId: presentation_id,
       requestBody: {
@@ -274,9 +227,7 @@ app.post("/insert-photo", async (req, res) => {
             },
           },
           {
-            deleteObject: {
-              objectId: grayBoxId,
-            },
+            deleteObject: { objectId: grayBoxId },
           },
         ],
       },
@@ -284,19 +235,12 @@ app.post("/insert-photo", async (req, res) => {
 
     console.log(`✅ Foto insertada en la presentación ${presentation_id}`);
 
-    // ── 6. Eliminar archivo temporal de Drive (60s de gracia) ──────────────
-    setTimeout(async () => {
-      try {
-        await drive.files.delete({ fileId: driveFileId });
-        console.log(`🗑️  Archivo temporal eliminado de Drive: ${driveFileId}`);
-      } catch (e) {
-        console.warn(
-          `⚠️  No se pudo eliminar el archivo de Drive: ${e.message}`
-        );
-      }
+    // ── 6. Limpiar imagen temporal (60s de gracia) ─────────────────────────
+    setTimeout(() => {
+      tempImages.delete(imageId);
+      console.log(`🗑️  Imagen temporal eliminada: ${imageId}`);
     }, 60_000);
 
-    // ── 7. Responder a Zapier ─────────────────────────────────────────────
     return res.json({
       success: true,
       presentation_id,
@@ -304,16 +248,6 @@ app.post("/insert-photo", async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Error en /insert-photo:", error.message);
-
-    // Limpieza de emergencia del archivo de Drive si falló algo después de subir
-    if (driveFileId) {
-      try {
-        const authClient = await auth.getClient();
-        const drive = google.drive({ version: "v3", auth: authClient });
-        await drive.files.delete({ fileId: driveFileId });
-      } catch (_) {}
-    }
-
     return res.status(500).json({
       error: "Error procesando la foto",
       details: error.message,
