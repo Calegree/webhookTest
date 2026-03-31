@@ -5,6 +5,8 @@ const sharp = require("sharp");
 const { google } = require("googleapis");
 const crypto = require("crypto");
 const path = require("path");
+const tf = require("@tensorflow/tfjs");
+const faceapi = require("@vladmandic/face-api");
 
 const app = express();
 app.use(express.json());
@@ -45,6 +47,52 @@ const FACE_PX = 330;
 
 // ─── Almacén temporal de imágenes en memoria ─────────────────────────────────
 const tempImages = new Map();
+
+// ─── Inicializar face-api ────────────────────────────────────────────────────
+let faceApiReady = false;
+
+async function initFaceApi() {
+  const modelPath = path.join(
+    __dirname,
+    "node_modules/@vladmandic/face-api/model"
+  );
+  await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath);
+  faceApiReady = true;
+  console.log("🧠 Face-API inicializado correctamente");
+}
+
+async function detectFace(imageBuffer) {
+  // Convertir imagen a raw pixels con sharp
+  const { data, info } = await sharp(imageBuffer, { failOn: "none" })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Crear tensor 3D [height, width, 4] RGBA
+  const tensor = tf.tensor3d(
+    new Uint8Array(data),
+    [info.height, info.width, 4]
+  );
+
+  // Detectar rostros
+  const detections = await faceapi.detectAllFaces(
+    tensor,
+    new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3 })
+  );
+
+  tensor.dispose();
+
+  if (detections.length === 0) return null;
+
+  // Retornar el rostro con mayor score
+  const best = detections.sort((a, b) => b.score - a.score)[0];
+  return {
+    x: Math.round(best.box.x),
+    y: Math.round(best.box.y),
+    width: Math.round(best.box.width),
+    height: Math.round(best.box.height),
+  };
+}
 
 // ─── Healthcheck ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
@@ -141,19 +189,54 @@ app.post("/insert-photo", async (req, res) => {
     const imageBuffer = Buffer.from(imageResponse.data);
     console.log(`✅ Imagen descargada (${imageBuffer.length} bytes)`);
 
-    // ── 2. Recortar zona del rostro y redimensionar a cuadrado ──────────
-    const processedImage = await sharp(imageBuffer, { failOn: "none" })
-      .resize(FACE_PX, FACE_PX, { fit: "cover", position: "attention" })
-      .jpeg({ quality: 92 })
-      .toBuffer();
+    // ── 2. Detectar rostro y recortar ──────────────────────────────────────
+    let processedImage;
 
-    console.log(`✂️  Rostro recortado y redimensionado a ${FACE_PX}×${FACE_PX}px`);
+    if (faceApiReady) {
+      const face = await detectFace(imageBuffer);
+
+      if (face) {
+        console.log(`👤 Rostro detectado en (${face.x},${face.y}) ${face.width}×${face.height}px`);
+
+        // Padding del 30% alrededor del rostro
+        const meta = await sharp(imageBuffer, { failOn: "none" }).metadata();
+        const padding = Math.round(Math.min(face.width, face.height) * 0.3);
+        const cropX = Math.max(0, face.x - padding);
+        const cropY = Math.max(0, face.y - padding);
+        const cropSide = Math.round(Math.max(face.width, face.height) + padding * 2);
+        const safeW = Math.min(cropSide, meta.width - cropX);
+        const safeH = Math.min(cropSide, meta.height - cropY);
+
+        processedImage = await sharp(imageBuffer, { failOn: "none" })
+          .extract({
+            left: cropX,
+            top: cropY,
+            width: Math.max(safeW, 1),
+            height: Math.max(safeH, 1),
+          })
+          .resize(FACE_PX, FACE_PX, { fit: "cover", position: "centre" })
+          .jpeg({ quality: 92 })
+          .toBuffer();
+
+        console.log(`✂️  Rostro recortado a ${FACE_PX}×${FACE_PX}px`);
+      } else {
+        console.log("⚠️  No se detectó rostro, usando recorte por atención");
+      }
+    }
+
+    // Fallback si no hay face-api o no se detectó rostro
+    if (!processedImage) {
+      processedImage = await sharp(imageBuffer, { failOn: "none" })
+        .resize(FACE_PX, FACE_PX, { fit: "cover", position: "attention" })
+        .jpeg({ quality: 92 })
+        .toBuffer();
+      console.log(`✂️  Imagen recortada (attention) a ${FACE_PX}×${FACE_PX}px`);
+    }
 
     // ── 3. Servir imagen temporalmente desde este servidor ─────────────────
     const imageId = crypto.randomUUID();
     tempImages.set(imageId, processedImage);
 
-    // Determinar URL pública
     const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
       : (process.env.PUBLIC_URL || `http://localhost:${PORT}`);
@@ -257,6 +340,16 @@ app.post("/insert-photo", async (req, res) => {
 
 // ─── Arranque del servidor ───────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`✅ Webhook Transearch listo en http://localhost:${PORT}`)
-);
+
+initFaceApi()
+  .then(() => {
+    app.listen(PORT, () =>
+      console.log(`✅ Webhook Transearch listo en http://localhost:${PORT}`)
+    );
+  })
+  .catch((err) => {
+    console.warn("⚠️  Face-API no pudo inicializarse, usando fallback:", err.message);
+    app.listen(PORT, () =>
+      console.log(`✅ Webhook Transearch listo en http://localhost:${PORT} (sin detección facial)`)
+    );
+  });
