@@ -62,6 +62,7 @@ app.get("/", (req, res) => {
 //   8. Retorna { success: true, presentation_id }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/insert-photo", async (req, res) => {
+  console.log("📦 Body recibido:", JSON.stringify(req.body, null, 2));
   const body = req.body.data || req.body;
   let { image_url, presentation_id, record_id } = body;
 
