@@ -3,7 +3,6 @@ const express = require("express");
 const axios = require("axios");
 const sharp = require("sharp");
 const { google } = require("googleapis");
-const vision = require("@google-cloud/vision");
 const { Readable } = require("stream");
 const path = require("path");
 
@@ -42,10 +41,6 @@ const auth = credentials
       ],
     });
 
-const visionClient = credentials
-  ? new vision.ImageAnnotatorClient({ credentials })
-  : new vision.ImageAnnotatorClient({ keyFilename: CREDENTIALS_PATH });
-
 // ─── Constantes de tamaño ────────────────────────────────────────────────────
 // 2.8 cm en EMU (English Metric Units): 1 inch = 914400 EMU, 1 inch = 2.54 cm
 const CM_2_8_IN_EMU = Math.round((2.8 / 2.54) * 914400); // ≈ 1,007,874 EMU
@@ -68,13 +63,12 @@ app.get("/", (req, res) => {
 // Flujo:
 //   0. Si no hay image_url, busca la foto en Airtable usando record_id
 //   1. Descarga la imagen
-//   2. Google Vision API → detecta el rostro y obtiene su bounding box
-//   3. Sharp → recorta solo la cara + resize cuadrado 2.8×2.8 cm
-//   4. Sube imagen procesada a Google Drive (pública temporalmente)
-//   5. Google Slides API → detecta el primer rectángulo gris del slide
-//   6. Crea la imagen en esa posición y elimina el rectángulo gris
-//   7. Elimina el archivo temporal de Drive (60s de gracia)
-//   8. Retorna { success: true, presentation_id }
+//   2. Sharp → redimensiona a cuadrado 2.8×2.8 cm
+//   3. Sube imagen procesada a Google Drive (pública temporalmente)
+//   4. Google Slides API → detecta el primer rectángulo gris del slide
+//   5. Crea la imagen en esa posición y elimina el rectángulo gris
+//   6. Elimina el archivo temporal de Drive (60s de gracia)
+//   7. Retorna { success: true, presentation_id }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/insert-photo", async (req, res) => {
   console.log("📦 Body recibido:", JSON.stringify(req.body, null, 2));
@@ -134,7 +128,7 @@ app.post("/insert-photo", async (req, res) => {
     console.log(`\n📥 Nueva solicitud — presentación: ${presentation_id}`);
     console.log(`🔗 URL imagen: ${image_url}`);
 
-    // ── 1. Descargar imagen del carnet ──────────────────────────────────────
+    // ── 1. Descargar imagen ────────────────────────────────────────────────
     const imageResponse = await axios.get(image_url, {
       responseType: "arraybuffer",
       timeout: 15000,
@@ -142,55 +136,15 @@ app.post("/insert-photo", async (req, res) => {
     const imageBuffer = Buffer.from(imageResponse.data);
     console.log(`✅ Imagen descargada (${imageBuffer.length} bytes)`);
 
-    // ── 2. Detectar rostro con Vision API ───────────────────────────────────
-    const [visionResult] = await visionClient.faceDetection({
-      image: { content: imageBuffer.toString("base64") },
-    });
-
-    const faces = visionResult.faceAnnotations;
-    if (!faces || faces.length === 0) {
-      return res.status(422).json({
-        error: "No se detectó ningún rostro en la imagen del carnet",
-      });
-    }
-
-    // Bounding box del primer rostro detectado
-    const face = faces[0];
-    const vertices = face.boundingPoly.vertices;
-    const faceX = vertices[0].x || 0;
-    const faceY = vertices[0].y || 0;
-    const faceW = (vertices[2].x || 0) - faceX;
-    const faceH = (vertices[2].y || 0) - faceY;
-
-    // Padding del 25% para no cortar el rostro justo al borde
-    const padding = Math.round(Math.min(faceW, faceH) * 0.25);
-    const cropX = Math.max(0, faceX - padding);
-    const cropY = Math.max(0, faceY - padding);
-    const cropSide = Math.round(Math.max(faceW, faceH) + padding * 2);
-
-    console.log(
-      `👤 Rostro detectado en (${faceX},${faceY}) tamaño ${faceW}×${faceH}px`
-    );
-
-    // ── 3. Recortar cara y redimensionar a cuadrado 2.8×2.8 cm ─────────────
-    const imageMeta = await sharp(imageBuffer).metadata();
-    const safeW = Math.min(cropSide, imageMeta.width - cropX);
-    const safeH = Math.min(cropSide, imageMeta.height - cropY);
-
-    const processedFace = await sharp(imageBuffer)
-      .extract({
-        left: Math.round(cropX),
-        top: Math.round(cropY),
-        width: Math.max(safeW, 1),
-        height: Math.max(safeH, 1),
-      })
-      .resize(FACE_PX, FACE_PX, { fit: "cover", position: "top" })
+    // ── 2. Redimensionar a cuadrado ────────────────────────────────────────
+    const processedImage = await sharp(imageBuffer)
+      .resize(FACE_PX, FACE_PX, { fit: "cover", position: "centre" })
       .jpeg({ quality: 92 })
       .toBuffer();
 
-    console.log(`✂️  Cara recortada y redimensionada a ${FACE_PX}×${FACE_PX}px`);
+    console.log(`✂️  Imagen redimensionada a ${FACE_PX}×${FACE_PX}px`);
 
-    // ── 4. Subir imagen procesada a Google Drive (pública) ──────────────────
+    // ── 3. Subir imagen procesada a Google Drive (pública) ─────────────────
     const authClient = await auth.getClient();
     const drive = google.drive({ version: "v3", auth: authClient });
 
@@ -201,7 +155,7 @@ app.post("/insert-photo", async (req, res) => {
       },
       media: {
         mimeType: "image/jpeg",
-        body: Readable.from(processedFace),
+        body: Readable.from(processedImage),
       },
       fields: "id",
     });
@@ -217,7 +171,7 @@ app.post("/insert-photo", async (req, res) => {
     const publicImageUrl = `https://drive.google.com/uc?export=view&id=${driveFileId}`;
     console.log(`☁️  Imagen subida a Drive: ${driveFileId}`);
 
-    // ── 5. Obtener el slide e identificar el cuadro gris ────────────────────
+    // ── 4. Obtener el slide e identificar el cuadro gris ───────────────────
     const slides = google.slides({ version: "v1", auth: authClient });
     const presentation = await slides.presentations.get({
       presentationId: presentation_id,
@@ -270,7 +224,7 @@ app.post("/insert-photo", async (req, res) => {
       });
     }
 
-    // ── 6. Insertar imagen en el slide y eliminar cuadro gris ───────────────
+    // ── 5. Insertar imagen en el slide y eliminar cuadro gris ──────────────
     // Forzamos tamaño 2.8×2.8 cm en EMU, manteniendo la posición del cuadro gris
     await slides.presentations.batchUpdate({
       presentationId: presentation_id,
@@ -300,7 +254,7 @@ app.post("/insert-photo", async (req, res) => {
 
     console.log(`✅ Foto insertada en la presentación ${presentation_id}`);
 
-    // ── 7. Eliminar archivo temporal de Drive (60s de gracia) ───────────────
+    // ── 6. Eliminar archivo temporal de Drive (60s de gracia) ──────────────
     setTimeout(async () => {
       try {
         await drive.files.delete({ fileId: driveFileId });
@@ -312,7 +266,7 @@ app.post("/insert-photo", async (req, res) => {
       }
     }, 60_000);
 
-    // ── 8. Responder a Zapier ────────────────────────────────────────────────
+    // ── 7. Responder a Zapier ─────────────────────────────────────────────
     return res.json({
       success: true,
       presentation_id,
