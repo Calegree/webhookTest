@@ -28,19 +28,19 @@ const CREDENTIALS_PATH = path.join(__dirname, "credentials.json");
 
 const auth = credentials
   ? new google.auth.GoogleAuth({
-      credentials,
-      scopes: [
-        "https://www.googleapis.com/auth/presentations",
-        "https://www.googleapis.com/auth/drive",
-      ],
-    })
+    credentials,
+    scopes: [
+      "https://www.googleapis.com/auth/presentations",
+      "https://www.googleapis.com/auth/drive",
+    ],
+  })
   : new google.auth.GoogleAuth({
-      keyFile: CREDENTIALS_PATH,
-      scopes: [
-        "https://www.googleapis.com/auth/presentations",
-        "https://www.googleapis.com/auth/drive",
-      ],
-    });
+    keyFile: CREDENTIALS_PATH,
+    scopes: [
+      "https://www.googleapis.com/auth/presentations",
+      "https://www.googleapis.com/auth/drive",
+    ],
+  });
 
 // ─── Constantes de tamaño ────────────────────────────────────────────────────
 const FACE_PX = 500; // resolución interna alta para buena calidad
@@ -569,11 +569,11 @@ app.post("/webhook/generate-vt", async (req, res) => {
 
     // 5. Guardar PDF en disco (sobrevive redeploys)
     const pdfId = crypto.randomUUID();
-    const tmpDir = path.join(__dirname, "tmp-pdfs");
-    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
-    const pdfFilePath = path.join(tmpDir, `${pdfId}.pdf`);
-    fs.writeFileSync(pdfFilePath, finalPdf);
-    console.log(`💾 PDF guardado en disco: ${pdfFilePath}`);
+    tempImages.set(pdfId, finalPdf);
+    setTimeout(() => {
+      tempImages.delete(pdfId);
+      console.log(`🗑️  PDF temporal eliminado: ${pdfId}`);
+    }, 86_400_000); // 24 horas
 
     const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
