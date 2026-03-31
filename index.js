@@ -63,7 +63,12 @@ app.get("/", (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/insert-photo", async (req, res) => {
   console.log("📦 Body recibido:", JSON.stringify(req.body, null, 2));
-  const body = req.body.data || req.body;
+  // Zapier puede enviar keys con espacios o anidar en "data"
+  const raw = req.body.data || req.body;
+  const body = {};
+  for (const [k, v] of Object.entries(raw)) {
+    body[k.trim()] = v;
+  }
   let { image_url, presentation_id, record_id } = body;
 
   // Validación de entrada
