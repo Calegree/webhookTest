@@ -309,7 +309,7 @@ app.post("/insert-photo", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /webhook/generate-vt — Genera PDF de Validación de Título
 // ─────────────────────────────────────────────────────────────────────────────
-const LOGO_PATH = path.join(__dirname, "image.png");
+const LOGO_PATH = path.join(__dirname, "image copy.png");
 const MONTHS_ES = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
