@@ -134,10 +134,16 @@ app.post("/insert-photo", async (req, res) => {
       timeout: 15000,
     });
     const imageBuffer = Buffer.from(imageResponse.data);
-    console.log(`✅ Imagen descargada (${imageBuffer.length} bytes)`);
+    const contentType = imageResponse.headers["content-type"] || "unknown";
+    console.log(`✅ Imagen descargada (${imageBuffer.length} bytes, tipo: ${contentType})`);
 
     // ── 2. Redimensionar a cuadrado ────────────────────────────────────────
-    const processedImage = await sharp(imageBuffer)
+    // Forzar conversión a PNG primero para manejar cualquier formato
+    const normalizedBuffer = await sharp(imageBuffer, { failOn: "none" })
+      .png()
+      .toBuffer();
+
+    const processedImage = await sharp(normalizedBuffer)
       .resize(FACE_PX, FACE_PX, { fit: "cover", position: "centre" })
       .jpeg({ quality: 92 })
       .toBuffer();
