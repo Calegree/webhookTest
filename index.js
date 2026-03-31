@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const sharp = require("sharp");
@@ -8,6 +9,12 @@ const path = require("path");
 
 const app = express();
 app.use(express.json());
+
+// ─── Airtable config ────────────────────────────────────────────────────────
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || "One Page";
+const AIRTABLE_PHOTO_FIELD = process.env.AIRTABLE_PHOTO_FIELD || "Foto";
 
 // ─── Autenticación con Service Account ───────────────────────────────────────
 const CREDENTIALS_PATH = path.join(__dirname, "credentials.json");
@@ -39,10 +46,13 @@ app.get("/", (req, res) => {
 // POST /insert-photo
 //
 // Body JSON:
-//   { "image_url": "...", "presentation_id": "..." }
+//   { "presentation_id": "...", "record_id": "..." }
+//   O bien:
+//   { "presentation_id": "...", "image_url": "..." }
 //
 // Flujo:
-//   1. Descarga el carnet desde image_url
+//   0. Si no hay image_url, busca la foto en Airtable usando record_id
+//   1. Descarga la imagen
 //   2. Google Vision API → detecta el rostro y obtiene su bounding box
 //   3. Sharp → recorta solo la cara + resize cuadrado 2.8×2.8 cm
 //   4. Sube imagen procesada a Google Drive (pública temporalmente)
@@ -52,13 +62,48 @@ app.get("/", (req, res) => {
 //   8. Retorna { success: true, presentation_id }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/insert-photo", async (req, res) => {
-  const { image_url, presentation_id } = req.body;
+  let { image_url, presentation_id, record_id } = req.body;
 
   // Validación de entrada
-  if (!image_url || !presentation_id) {
+  if (!presentation_id) {
     return res.status(400).json({
-      error: "Faltan parámetros requeridos: image_url y presentation_id",
+      error: "Falta parámetro requerido: presentation_id",
     });
+  }
+
+  if (!image_url && !record_id) {
+    return res.status(400).json({
+      error:
+        "Falta parámetro requerido: image_url o record_id (para buscar foto en Airtable)",
+    });
+  }
+
+  // ── 0. Si no hay image_url, obtenerla desde Airtable ────────────────────
+  if (!image_url) {
+    console.log(`🔍 Buscando foto en Airtable para registro: ${record_id}`);
+    try {
+      const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}/${record_id}`;
+      const airtableRes = await axios.get(airtableUrl, {
+        headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
+        timeout: 10000,
+      });
+
+      const photoField = airtableRes.data.fields[AIRTABLE_PHOTO_FIELD];
+      if (!photoField || !Array.isArray(photoField) || photoField.length === 0) {
+        return res.status(422).json({
+          error: `El registro ${record_id} no tiene foto en el campo "${AIRTABLE_PHOTO_FIELD}"`,
+        });
+      }
+
+      image_url = photoField[0].url;
+      console.log(`📸 URL de foto obtenida desde Airtable: ${image_url}`);
+    } catch (err) {
+      console.error("❌ Error consultando Airtable:", err.message);
+      return res.status(502).json({
+        error: "Error consultando Airtable para obtener la foto",
+        details: err.message,
+      });
+    }
   }
 
   let driveFileId = null;
