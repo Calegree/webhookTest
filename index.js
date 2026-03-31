@@ -141,13 +141,13 @@ app.post("/insert-photo", async (req, res) => {
     const imageBuffer = Buffer.from(imageResponse.data);
     console.log(`✅ Imagen descargada (${imageBuffer.length} bytes)`);
 
-    // ── 2. Redimensionar a cuadrado ────────────────────────────────────────
+    // ── 2. Recortar zona del rostro y redimensionar a cuadrado ──────────
     const processedImage = await sharp(imageBuffer, { failOn: "none" })
-      .resize(FACE_PX, FACE_PX, { fit: "cover", position: "centre" })
+      .resize(FACE_PX, FACE_PX, { fit: "cover", position: "attention" })
       .jpeg({ quality: 92 })
       .toBuffer();
 
-    console.log(`✂️  Imagen redimensionada a ${FACE_PX}×${FACE_PX}px`);
+    console.log(`✂️  Rostro recortado y redimensionado a ${FACE_PX}×${FACE_PX}px`);
 
     // ── 3. Servir imagen temporalmente desde este servidor ─────────────────
     const imageId = crypto.randomUUID();
