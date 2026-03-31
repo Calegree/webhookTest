@@ -567,7 +567,7 @@ app.post("/webhook/generate-vt", async (req, res) => {
     const fileName = `${data.id || "VT"}-VT-${data.nombre}.pdf`;
     console.log(`✅ PDF generado: ${fileName} (${finalPdf.length} bytes)`);
 
-    // 5. Servir PDF temporalmente
+    // 5. Servir PDF temporalmente (para descarga directa)
     const pdfId = crypto.randomUUID();
     tempImages.set(pdfId, finalPdf);
     setTimeout(() => {
