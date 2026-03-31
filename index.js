@@ -40,26 +40,23 @@ const auth = credentials
     });
 
 // ─── Constantes de tamaño ────────────────────────────────────────────────────
-// Foto en slide: 70px ≈ ~1.85cm. En EMU: 1.85cm / 2.54 * 914400
-const PHOTO_CM = 1.85;
-const PHOTO_EMU = Math.round((PHOTO_CM / 2.54) * 914400);
 const FACE_PX = 500; // resolución interna alta para buena calidad
 
 // ─── Almacén temporal de imágenes en memoria ─────────────────────────────────
 const tempImages = new Map();
 
 // ─── Recorte de rostro desde carnet chileno ──────────────────────────────────
-async function cropFaceFromCarnet(imageBuffer) {
+async function cropFaceFromCarnet(imageBuffer, targetAspect) {
   const meta = await sharp(imageBuffer, { failOn: "none" }).metadata();
   const w = meta.width;
   const h = meta.height;
 
-  // Zona ajustada: solo la cara, sin letras ni números
-  // Borde izquierdo 8%, borde derecho ~28% (ancho 20%), arriba 20%, alto 40%
-  const cropLeft = Math.round(w * 0.08);
-  const cropTop = Math.round(h * 0.20);
-  const cropWidth = Math.round(w * 0.20);
-  const cropHeight = Math.round(h * 0.40);
+  // Zona más amplia para capturar toda la cara sin letras ni números
+  // Carnet chileno: foto en la zona izquierda-centro
+  const cropLeft = Math.round(w * 0.04);
+  const cropTop = Math.round(h * 0.10);
+  const cropWidth = Math.round(w * 0.32);
+  const cropHeight = Math.round(h * 0.60);
 
   console.log(`📐 Imagen original: ${w}×${h}px, recortando cara: ${cropWidth}×${cropHeight}px desde (${cropLeft},${cropTop})`);
 
@@ -72,13 +69,63 @@ async function cropFaceFromCarnet(imageBuffer) {
     })
     .toBuffer();
 
-  // Redimensionar a cuadrado con buena resolución
+  // Calcular dimensiones de salida según el aspect ratio del placeholder
+  const aspect = targetAspect || 1;
+  const outW = FACE_PX;
+  const outH = Math.round(FACE_PX / aspect);
+
   const processedImage = await sharp(faceRegion)
-    .resize(FACE_PX, FACE_PX, { fit: "cover", position: "attention" })
+    .resize(outW, outH, { fit: "cover", position: "centre" })
     .jpeg({ quality: 95 })
     .toBuffer();
 
+  console.log(`✂️  Rostro recortado a ${outW}×${outH}px (aspect: ${aspect.toFixed(2)})`);
   return processedImage;
+}
+
+// ─── Auto-ajustar texto en la presentación ──────────────────────────────────
+async function fixTextOverflow(slides, presentationId) {
+  const presentation = await slides.presentations.get({
+    presentationId: presentationId,
+  });
+
+  const requests = [];
+
+  for (const slide of presentation.data.slides || []) {
+    for (const element of slide.pageElements || []) {
+      if (!element.shape || !element.shape.text) continue;
+
+      // Solo procesar shapes que contengan texto
+      const textContent = (element.shape.text.textElements || [])
+        .map((te) => te.textRun?.content || "")
+        .join("");
+
+      if (textContent.trim().length === 0) continue;
+
+      // Activar auto-shrink en todos los text boxes con contenido
+      requests.push({
+        updateShapeProperties: {
+          objectId: element.objectId,
+          shapeProperties: {
+            autofit: {
+              autofitType: "TEXT_AUTOFIT",
+            },
+          },
+          fields: "autofit",
+        },
+      });
+    }
+  }
+
+  if (requests.length > 0) {
+    await slides.presentations.batchUpdate({
+      presentationId: presentationId,
+      requestBody: { requests },
+    });
+    console.log(`📏 Auto-fit aplicado a ${requests.length} cajas de texto`);
+  }
+
+  return requests.length;
 }
 
 // ─── Healthcheck ─────────────────────────────────────────────────────────────
@@ -178,7 +225,6 @@ app.post("/insert-photo", async (req, res) => {
 
     // ── 2. Recortar rostro del carnet ──────────────────────────────────────
     const processedImage = await cropFaceFromCarnet(imageBuffer);
-    console.log(`✂️  Rostro recortado a ${FACE_PX}×${FACE_PX}px`);
 
     // ── 3. Servir imagen temporalmente desde este servidor ─────────────────
     const imageId = crypto.randomUUID();
@@ -198,6 +244,7 @@ app.post("/insert-photo", async (req, res) => {
     });
 
     let grayBoxId = null;
+    let grayBoxSize = null;
     let grayBoxTransform = null;
     let slideObjectId = null;
 
@@ -208,6 +255,7 @@ app.post("/insert-photo", async (req, res) => {
         // Buscar por objectId exacto primero
         if (element.objectId === "g1f522768429_2_82") {
           grayBoxId = element.objectId;
+          grayBoxSize = element.size;
           grayBoxTransform = element.transform;
           slideObjectId = slide.objectId;
           console.log(`🔲 Placeholder encontrado por ID: ${grayBoxId}`);
@@ -232,6 +280,7 @@ app.post("/insert-photo", async (req, res) => {
 
         if (isGray) {
           grayBoxId = element.objectId;
+          grayBoxSize = element.size;
           grayBoxTransform = element.transform;
           slideObjectId = slide.objectId;
           console.log(`🔲 Cuadro gris encontrado: ${grayBoxId} (RGB: ${r},${g},${b})`);
@@ -248,7 +297,11 @@ app.post("/insert-photo", async (req, res) => {
       });
     }
 
-    // ── 5. Insertar imagen (70×70 en slide) y eliminar placeholder ────────
+    // ── 5. Insertar imagen con tamaño real del placeholder ────────────────
+    const boxW = grayBoxSize.width.magnitude;
+    const boxH = grayBoxSize.height.magnitude;
+    console.log(`📐 Placeholder size: ${boxW} × ${boxH} EMU`);
+
     await slides.presentations.batchUpdate({
       presentationId: presentation_id,
       requestBody: {
@@ -259,8 +312,8 @@ app.post("/insert-photo", async (req, res) => {
               elementProperties: {
                 pageObjectId: slideObjectId,
                 size: {
-                  width: { magnitude: PHOTO_EMU, unit: "EMU" },
-                  height: { magnitude: PHOTO_EMU, unit: "EMU" },
+                  width: { magnitude: boxW, unit: "EMU" },
+                  height: { magnitude: boxH, unit: "EMU" },
                 },
                 transform: grayBoxTransform,
               },
@@ -273,7 +326,11 @@ app.post("/insert-photo", async (req, res) => {
       },
     });
 
-    console.log(`✅ Foto insertada (${PHOTO_CM}cm × ${PHOTO_CM}cm) en ${presentation_id}`);
+    console.log(`✅ Foto insertada (${boxW}×${boxH} EMU) en ${presentation_id}`);
+
+    // ── 5b. Auto-ajustar textos que se desbordan ──────────────────────────
+    const fixedCount = await fixTextOverflow(slides, presentation_id);
+    console.log(`📏 ${fixedCount} cajas de texto ajustadas`);
 
     // ── 6. Limpiar imagen temporal (60s de gracia) ─────────────────────────
     setTimeout(() => {
@@ -290,6 +347,36 @@ app.post("/insert-photo", async (req, res) => {
     console.error("❌ Error en /insert-photo:", error.message);
     return res.status(500).json({
       error: "Error procesando la foto",
+      details: error.message,
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /fix-text — Endpoint independiente para ajustar textos desbordados
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/fix-text", async (req, res) => {
+  const { presentation_id } = req.body.data || req.body;
+
+  if (!presentation_id) {
+    return res.status(400).json({ error: "Falta presentation_id" });
+  }
+
+  try {
+    const authClient = await auth.getClient();
+    const slides = google.slides({ version: "v1", auth: authClient });
+    const fixedCount = await fixTextOverflow(slides, presentation_id);
+
+    return res.json({
+      success: true,
+      presentation_id,
+      fixed_text_boxes: fixedCount,
+      message: `Auto-fit aplicado a ${fixedCount} cajas de texto`,
+    });
+  } catch (error) {
+    console.error("❌ Error en /fix-text:", error.message);
+    return res.status(500).json({
+      error: "Error ajustando textos",
       details: error.message,
     });
   }
