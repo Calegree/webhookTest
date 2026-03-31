@@ -40,8 +40,11 @@ const auth = credentials
     });
 
 // ─── Constantes de tamaño ────────────────────────────────────────────────────
-const CM_2_8_IN_EMU = Math.round((2.8 / 2.54) * 914400);
-const FACE_PX = 330;
+// Tamaño del retrato: 3.5 cm ancho × 4.5 cm alto (formato carnet)
+const PHOTO_W_EMU = Math.round((3.5 / 2.54) * 914400); // ≈ 1,260,000 EMU
+const PHOTO_H_EMU = Math.round((4.5 / 2.54) * 914400); // ≈ 1,620,000 EMU
+const FACE_W_PX = 400;
+const FACE_H_PX = 515;
 
 // ─── Almacén temporal de imágenes en memoria ─────────────────────────────────
 const tempImages = new Map();
@@ -74,7 +77,7 @@ async function cropFaceFromCarnet(imageBuffer) {
 
   // Paso 2: usar "attention" en la zona recortada para centrar la cara
   const processedImage = await sharp(faceRegion)
-    .resize(FACE_PX, FACE_PX, { fit: "cover", position: "attention" })
+    .resize(FACE_W_PX, FACE_H_PX, { fit: "cover", position: "attention" })
     .jpeg({ quality: 92 })
     .toBuffer();
 
@@ -178,7 +181,7 @@ app.post("/insert-photo", async (req, res) => {
 
     // ── 2. Recortar rostro del carnet ──────────────────────────────────────
     const processedImage = await cropFaceFromCarnet(imageBuffer);
-    console.log(`✂️  Rostro recortado a ${FACE_PX}×${FACE_PX}px`);
+    console.log(`✂️  Rostro recortado a ${FACE_W_PX}×${FACE_H_PX}px`);
 
     // ── 3. Servir imagen temporalmente desde este servidor ─────────────────
     const imageId = crypto.randomUUID();
@@ -249,8 +252,8 @@ app.post("/insert-photo", async (req, res) => {
               elementProperties: {
                 pageObjectId: slideObjectId,
                 size: {
-                  width: { magnitude: CM_2_8_IN_EMU, unit: "EMU" },
-                  height: { magnitude: CM_2_8_IN_EMU, unit: "EMU" },
+                  width: { magnitude: PHOTO_W_EMU, unit: "EMU" },
+                  height: { magnitude: PHOTO_H_EMU, unit: "EMU" },
                 },
                 transform: grayBoxTransform,
               },
