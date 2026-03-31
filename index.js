@@ -309,7 +309,7 @@ app.post("/insert-photo", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /webhook/generate-vt — Genera PDF de Validación de Título
 // ─────────────────────────────────────────────────────────────────────────────
-const LOGO_PATH = path.join(__dirname, "logo-transearch.png");
+const LOGO_PATH = path.join(__dirname, "image.png");
 const MONTHS_ES = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
@@ -453,29 +453,54 @@ async function mergePDFs(coverBuffer, documentBuffers) {
 }
 
 // Agregar logo como header a todas las páginas del PDF final
+// Desplaza el contenido original hacia abajo para no superponerse
 async function addLogoHeader(pdfBuffer) {
   if (!fs.existsSync(LOGO_PATH)) return pdfBuffer;
 
-  const doc = await PDFLib.load(pdfBuffer);
+  const srcDoc = await PDFLib.load(pdfBuffer);
   const logoBytes = fs.readFileSync(LOGO_PATH);
-  const logo = await doc.embedPng(logoBytes);
 
-  const pages = doc.getPages();
-  // Empezar desde página 2 (la portada ya tiene logo)
-  for (let i = 1; i < pages.length; i++) {
-    const page = pages[i];
-    const { width } = page.getSize();
-    const logoW = 150;
-    const logoH = (logo.height / logo.width) * logoW;
-    page.drawImage(logo, {
-      x: (width - logoW) / 2,
-      y: page.getSize().height - logoH - 20,
-      width: logoW,
-      height: logoH,
-    });
+  const destDoc = await PDFLib.create();
+  const logo = await destDoc.embedPng(logoBytes);
+
+  const logoW = 150;
+  const logoH = (logo.height / logo.width) * logoW;
+  const headerSpace = logoH + 30; // espacio para logo + margen
+
+  const srcPages = srcDoc.getPages();
+
+  for (let i = 0; i < srcPages.length; i++) {
+    const srcPage = srcPages[i];
+    const { width, height } = srcPage.getSize();
+
+    if (i === 0) {
+      // Portada: copiar tal cual (ya tiene su propio logo)
+      const [copied] = await destDoc.copyPages(srcDoc, [i]);
+      destDoc.addPage(copied);
+    } else {
+      // Páginas 2+: crear página más alta, embeber original desplazada abajo
+      const [embedded] = await destDoc.embedPages(srcDoc, [i]);
+      const newPage = destDoc.addPage([width, height + headerSpace]);
+
+      // Dibujar contenido original desplazado hacia abajo
+      newPage.drawPage(embedded, {
+        x: 0,
+        y: 0,
+        width: width,
+        height: height,
+      });
+
+      // Dibujar logo centrado en el espacio superior
+      newPage.drawImage(logo, {
+        x: (width - logoW) / 2,
+        y: height + (headerSpace - logoH) / 2,
+        width: logoW,
+        height: logoH,
+      });
+    }
   }
 
-  return Buffer.from(await doc.save());
+  return Buffer.from(await destDoc.save());
 }
 
 app.post("/webhook/generate-vt", async (req, res) => {
