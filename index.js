@@ -512,8 +512,16 @@ app.post("/webhook/generate-vt", async (req, res) => {
 
         const docField = recordRes.data.fields[vtDocField];
         if (docField && Array.isArray(docField)) {
-          const realUrls = docField.map((att) => att.url).filter(Boolean);
-          console.log(`📎 ${realUrls.length} documentos encontrados via API`);
+          const filtered = docField.filter((att) => {
+            const name = (att.filename || "").toUpperCase();
+            if (name.includes("VT")) {
+              console.log(`⏭️  Saltando documento VT: ${att.filename}`);
+              return false;
+            }
+            return true;
+          });
+          const realUrls = filtered.map((att) => att.url).filter(Boolean);
+          console.log(`📎 ${realUrls.length} documentos encontrados via API (${docField.length - filtered.length} VT excluidos)`);
           documentBuffers = await downloadAttachments(realUrls);
         }
       } catch (err) {
