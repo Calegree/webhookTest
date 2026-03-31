@@ -62,7 +62,8 @@ app.get("/", (req, res) => {
 //   8. Retorna { success: true, presentation_id }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/insert-photo", async (req, res) => {
-  let { image_url, presentation_id, record_id } = req.body;
+  const body = req.body.data || req.body;
+  let { image_url, presentation_id, record_id } = body;
 
   // Validación de entrada
   if (!presentation_id) {
