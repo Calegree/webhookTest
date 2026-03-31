@@ -111,7 +111,27 @@ app.post("/insert-photo", async (req, res) => {
         });
       }
 
-      image_url = photoField[0].url;
+      // Buscar el primer attachment que sea imagen directa
+      const imageAttachment = photoField.find((att) =>
+        att.type && att.type.startsWith("image/")
+      );
+
+      if (imageAttachment) {
+        image_url = imageAttachment.url;
+      } else {
+        // Es PDF u otro formato — usar thumbnail de Airtable (mayor resolución disponible)
+        const att = photoField[0];
+        const thumbUrl = att.thumbnails?.full?.url
+          || att.thumbnails?.large?.url;
+        if (thumbUrl) {
+          image_url = thumbUrl;
+          console.log(`📎 Archivo es ${att.type}, usando thumbnail de Airtable`);
+        } else {
+          return res.status(422).json({
+            error: `El archivo en "${AIRTABLE_PHOTO_FIELD}" es ${att.type} y no tiene thumbnails disponibles. Sube una imagen JPG/PNG o un PDF con contenido visual.`,
+          });
+        }
+      }
       console.log(`📸 URL de foto obtenida desde Airtable: ${image_url}`);
     } catch (err) {
       console.error("❌ Error consultando Airtable:", err.message);
