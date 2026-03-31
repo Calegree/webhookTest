@@ -573,7 +573,7 @@ app.post("/webhook/generate-vt", async (req, res) => {
     setTimeout(() => {
       tempImages.delete(pdfId);
       console.log(`🗑️  PDF temporal eliminado: ${pdfId}`);
-    }, 86_400_000); // 24 horas
+    }, 300_000); // 5 min
 
     const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
