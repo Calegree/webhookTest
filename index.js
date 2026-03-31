@@ -5,6 +5,9 @@ const sharp = require("sharp");
 const { google } = require("googleapis");
 const crypto = require("crypto");
 const path = require("path");
+const fs = require("fs");
+const PDFDocument = require("pdfkit");
+const { PDFDocument: PDFLib } = require("pdf-lib");
 
 const app = express();
 app.use(express.json());
@@ -301,6 +304,243 @@ app.post("/insert-photo", async (req, res) => {
       details: error.message,
     });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /webhook/generate-vt — Genera PDF de Validación de Título
+// ─────────────────────────────────────────────────────────────────────────────
+const LOGO_PATH = path.join(__dirname, "logo-transearch.png");
+const MONTHS_ES = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+];
+
+function buildCoverPage(data) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "LETTER", margin: 50 });
+    const chunks = [];
+    doc.on("data", (c) => chunks.push(c));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    // Logo centrado
+    if (fs.existsSync(LOGO_PATH)) {
+      doc.image(LOGO_PATH, 200, 30, { width: 200 });
+    }
+
+    // Título
+    doc.moveDown(5);
+    doc.font("Helvetica-Bold").fontSize(18).text("VALIDACIÓN DE TÍTULO", {
+      align: "center",
+    });
+    doc.moveDown(2);
+
+    // Tabla de datos
+    const fields = [
+      { label: "Nombre completo", value: data.nombre },
+      { label: "Rut", value: data.rut },
+      null, // separador
+      { label: "Cargo al que postula", value: data.cargo },
+      { label: "ID", value: data.id },
+      { label: "División", value: data.division },
+      null,
+      { label: "Título", value: data.titulo },
+      { label: "Establecimiento Educacional", value: data.establecimiento },
+      { label: "Estado", value: "Validado" },
+      { label: "Contacto de Validación", value: data.contacto },
+    ];
+
+    const labelX = 90;
+    const valueX = 240;
+    let y = doc.y;
+
+    for (const field of fields) {
+      if (!field) {
+        y += 20;
+        continue;
+      }
+      doc.font("Helvetica").fontSize(12);
+      doc.text(field.label, labelX, y);
+      doc.text(field.value || "", valueX, y, { width: 300 });
+      y += Math.max(20, doc.heightOfString(field.value || "", { width: 300 }) + 6);
+    }
+
+    // Fecha
+    const now = new Date();
+    const dateStr = `Santiago, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} del ${now.getFullYear()}`;
+    doc.moveDown(4);
+    doc.font("Helvetica").fontSize(11).text(dateStr, labelX - 20);
+
+    doc.end();
+  });
+}
+
+async function downloadAttachments(documentos) {
+  // documentos puede ser: string JSON de array, string de URLs separadas por coma, o ya un array
+  let urls = [];
+
+  if (Array.isArray(documentos)) {
+    // Array de objetos {url:...} o strings
+    urls = documentos.map((d) => (typeof d === "string" ? d : d.url)).filter(Boolean);
+  } else if (typeof documentos === "string") {
+    try {
+      const parsed = JSON.parse(documentos);
+      if (Array.isArray(parsed)) {
+        urls = parsed.map((d) => (typeof d === "string" ? d : d.url)).filter(Boolean);
+      }
+    } catch {
+      // Es string plano, separar por coma
+      urls = documentos.split(",").map((u) => u.trim()).filter(Boolean);
+    }
+  }
+
+  const buffers = [];
+  for (const url of urls) {
+    try {
+      console.log(`📎 Descargando documento: ${url.substring(0, 80)}...`);
+      const res = await axios.get(url, { responseType: "arraybuffer", timeout: 30000 });
+      buffers.push(Buffer.from(res.data));
+    } catch (err) {
+      console.error(`⚠️  Error descargando ${url.substring(0, 60)}: ${err.message}`);
+    }
+  }
+  return buffers;
+}
+
+async function mergePDFs(coverBuffer, documentBuffers) {
+  const merged = await PDFLib.create();
+
+  // Agregar la portada
+  const coverDoc = await PDFLib.load(coverBuffer);
+  const coverPages = await merged.copyPages(coverDoc, coverDoc.getPageIndices());
+  for (const p of coverPages) merged.addPage(p);
+
+  // Agregar cada documento
+  for (const buf of documentBuffers) {
+    try {
+      // Intentar como PDF
+      const docPdf = await PDFLib.load(buf, { ignoreEncryption: true });
+      const pages = await merged.copyPages(docPdf, docPdf.getPageIndices());
+      for (const p of pages) merged.addPage(p);
+    } catch {
+      // Si no es PDF, intentar como imagen
+      try {
+        let img;
+        const header = buf.slice(0, 4).toString("hex");
+        if (header.startsWith("89504e47")) {
+          img = await merged.embedPng(buf);
+        } else {
+          img = await merged.embedJpg(buf);
+        }
+        const page = merged.addPage();
+        const { width: pw, height: ph } = page.getSize();
+        const scale = Math.min((pw - 80) / img.width, (ph - 80) / img.height, 1);
+        const iw = img.width * scale;
+        const ih = img.height * scale;
+        page.drawImage(img, {
+          x: (pw - iw) / 2,
+          y: (ph - ih) / 2,
+          width: iw,
+          height: ih,
+        });
+      } catch (imgErr) {
+        console.error(`⚠️  No se pudo procesar documento: ${imgErr.message}`);
+      }
+    }
+  }
+
+  return Buffer.from(await merged.save());
+}
+
+// Agregar logo como header a todas las páginas del PDF final
+async function addLogoHeader(pdfBuffer) {
+  if (!fs.existsSync(LOGO_PATH)) return pdfBuffer;
+
+  const doc = await PDFLib.load(pdfBuffer);
+  const logoBytes = fs.readFileSync(LOGO_PATH);
+  const logo = await doc.embedPng(logoBytes);
+
+  const pages = doc.getPages();
+  // Empezar desde página 2 (la portada ya tiene logo)
+  for (let i = 1; i < pages.length; i++) {
+    const page = pages[i];
+    const { width } = page.getSize();
+    const logoW = 150;
+    const logoH = (logo.height / logo.width) * logoW;
+    page.drawImage(logo, {
+      x: (width - logoW) / 2,
+      y: page.getSize().height - logoH - 20,
+      width: logoW,
+      height: logoH,
+    });
+  }
+
+  return Buffer.from(await doc.save());
+}
+
+app.post("/webhook/generate-vt", async (req, res) => {
+  console.log("📦 [VT] Body recibido:", JSON.stringify(req.body, null, 2));
+  const data = req.body;
+
+  if (!data.nombre || !data.rut) {
+    return res.status(400).json({ error: "Faltan campos requeridos: nombre, rut" });
+  }
+
+  try {
+    // 1. Generar portada
+    console.log(`📄 Generando VT para: ${data.nombre}`);
+    const coverBuffer = await buildCoverPage(data);
+
+    // 2. Descargar documentos adjuntos
+    const documentBuffers = await downloadAttachments(data.documentos);
+    console.log(`📎 ${documentBuffers.length} documentos descargados`);
+
+    // 3. Merge todo en un solo PDF
+    let finalPdf = await mergePDFs(coverBuffer, documentBuffers);
+
+    // 4. Agregar logo header a las páginas de documentos
+    finalPdf = await addLogoHeader(finalPdf);
+
+    const fileName = `${data.id || "VT"}-VT-${data.nombre}.pdf`;
+    console.log(`✅ PDF generado: ${fileName} (${finalPdf.length} bytes)`);
+
+    // 5. Servir PDF temporalmente
+    const pdfId = crypto.randomUUID();
+    tempImages.set(pdfId, finalPdf);
+    setTimeout(() => {
+      tempImages.delete(pdfId);
+      console.log(`🗑️  PDF temporal eliminado: ${pdfId}`);
+    }, 300_000); // 5 min
+
+    const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+    const pdfUrl = `${baseUrl}/tmp/${pdfId}.pdf`;
+
+    return res.json({
+      success: true,
+      fileName,
+      pdfUrl,
+      message: `VT generada para ${data.nombre}`,
+    });
+  } catch (error) {
+    console.error("❌ Error en /webhook/generate-vt:", error.message);
+    return res.status(500).json({
+      error: "Error generando VT",
+      details: error.message,
+    });
+  }
+});
+
+// Servir PDFs temporales
+app.get("/tmp/:id.pdf", (req, res) => {
+  const pdfBuffer = tempImages.get(req.params.id);
+  if (!pdfBuffer) {
+    return res.status(404).send("PDF no encontrado o expirado");
+  }
+  res.set("Content-Type", "application/pdf");
+  res.set("Content-Disposition", "inline");
+  res.send(pdfBuffer);
 });
 
 // ─── Arranque del servidor ───────────────────────────────────────────────────
