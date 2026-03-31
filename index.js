@@ -17,19 +17,34 @@ const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || "One Page";
 const AIRTABLE_PHOTO_FIELD = process.env.AIRTABLE_PHOTO_FIELD || "Foto";
 
 // ─── Autenticación con Service Account ───────────────────────────────────────
+// En producción (Railway) usa la variable de entorno GOOGLE_CREDENTIALS
+// En local usa el archivo credentials.json
+let credentials;
+if (process.env.GOOGLE_CREDENTIALS) {
+  credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+}
+
 const CREDENTIALS_PATH = path.join(__dirname, "credentials.json");
 
-const auth = new google.auth.GoogleAuth({
-  keyFile: CREDENTIALS_PATH,
-  scopes: [
-    "https://www.googleapis.com/auth/presentations",
-    "https://www.googleapis.com/auth/drive",
-  ],
-});
+const auth = credentials
+  ? new google.auth.GoogleAuth({
+      credentials,
+      scopes: [
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/drive",
+      ],
+    })
+  : new google.auth.GoogleAuth({
+      keyFile: CREDENTIALS_PATH,
+      scopes: [
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/drive",
+      ],
+    });
 
-const visionClient = new vision.ImageAnnotatorClient({
-  keyFilename: CREDENTIALS_PATH,
-});
+const visionClient = credentials
+  ? new vision.ImageAnnotatorClient({ credentials })
+  : new vision.ImageAnnotatorClient({ keyFilename: CREDENTIALS_PATH });
 
 // ─── Constantes de tamaño ────────────────────────────────────────────────────
 // 2.8 cm en EMU (English Metric Units): 1 inch = 914400 EMU, 1 inch = 2.54 cm
