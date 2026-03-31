@@ -83,92 +83,6 @@ async function cropFaceFromCarnet(imageBuffer, targetAspect) {
   return processedImage;
 }
 
-// ─── Auto-ajustar texto en la presentación ──────────────────────────────────
-// EMU por punto tipográfico: 1pt = 12700 EMU
-const PT_TO_EMU = 12700;
-// Ancho promedio de un carácter como fracción del font size (aprox para sans-serif)
-const CHAR_WIDTH_RATIO = 0.55;
-
-async function fixTextOverflow(slides, presentationId) {
-  const presentation = await slides.presentations.get({
-    presentationId: presentationId,
-  });
-
-  const requests = [];
-
-  for (const slide of presentation.data.slides || []) {
-    for (const element of slide.pageElements || []) {
-      if (!element.shape || !element.shape.text) continue;
-
-      // Obtener dimensiones de la caja en EMU
-      const boxWidthEmu = (element.size?.width?.magnitude || 0) *
-        Math.abs(element.transform?.scaleX || 1);
-
-      if (boxWidthEmu === 0) continue;
-
-      // Márgenes internos de la caja (en EMU)
-      const marginLeft = element.shape.shapeProperties?.contentAlignment ? 0 :
-        (element.shape.text?.textElements?.[0]?.paragraphMarker?.bullet ? 45720 : 0);
-
-      const usableWidth = boxWidthEmu - marginLeft;
-
-      // Analizar cada línea de texto del shape
-      const textElements = element.shape.text.textElements || [];
-
-      for (const te of textElements) {
-        if (!te.textRun || !te.textRun.content) continue;
-
-        const text = te.textRun.content.replace(/\n$/, "");
-        if (text.length === 0) continue;
-
-        const currentFontSize = te.textRun.style?.fontSize?.magnitude || 10;
-        const currentFontEmu = currentFontSize * PT_TO_EMU;
-
-        // Estimar ancho del texto: caracteres * ancho_promedio_char * font_size_emu
-        const estimatedTextWidth = text.length * CHAR_WIDTH_RATIO * currentFontEmu;
-
-        if (estimatedTextWidth > usableWidth) {
-          // Calcular font size que cabe
-          const ratio = usableWidth / estimatedTextWidth;
-          let newFontSize = Math.floor(currentFontSize * ratio * 10) / 10;
-          // No reducir más del 50% del tamaño original
-          newFontSize = Math.max(newFontSize, currentFontSize * 0.5);
-
-          console.log(`📏 Texto "${text.substring(0, 30)}..." ${currentFontSize}pt → ${newFontSize}pt (${text.length} chars)`);
-
-          requests.push({
-            updateTextStyle: {
-              objectId: element.objectId,
-              textRange: {
-                type: "ALL",
-              },
-              style: {
-                fontSize: {
-                  magnitude: newFontSize,
-                  unit: "PT",
-                },
-              },
-              fields: "fontSize",
-            },
-          });
-          // Solo un ajuste por shape (evitar múltiples updates al mismo)
-          break;
-        }
-      }
-    }
-  }
-
-  if (requests.length > 0) {
-    await slides.presentations.batchUpdate({
-      presentationId: presentationId,
-      requestBody: { requests },
-    });
-    console.log(`📏 Font size ajustado en ${requests.length} cajas de texto`);
-  }
-
-  return requests.length;
-}
-
 // ─── Healthcheck ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.send("Webhook Transearch — Insercion de fotos en Google Slides activo");
@@ -369,10 +283,6 @@ app.post("/insert-photo", async (req, res) => {
 
     console.log(`✅ Foto insertada (${boxW}×${boxH} EMU) en ${presentation_id}`);
 
-    // ── 5b. Auto-ajustar textos que se desbordan ──────────────────────────
-    const fixedCount = await fixTextOverflow(slides, presentation_id);
-    console.log(`📏 ${fixedCount} cajas de texto ajustadas`);
-
     // ── 6. Limpiar imagen temporal (60s de gracia) ─────────────────────────
     setTimeout(() => {
       tempImages.delete(imageId);
@@ -388,36 +298,6 @@ app.post("/insert-photo", async (req, res) => {
     console.error("❌ Error en /insert-photo:", error.message);
     return res.status(500).json({
       error: "Error procesando la foto",
-      details: error.message,
-    });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /fix-text — Endpoint independiente para ajustar textos desbordados
-// ─────────────────────────────────────────────────────────────────────────────
-app.post("/fix-text", async (req, res) => {
-  const { presentation_id } = req.body.data || req.body;
-
-  if (!presentation_id) {
-    return res.status(400).json({ error: "Falta presentation_id" });
-  }
-
-  try {
-    const authClient = await auth.getClient();
-    const slides = google.slides({ version: "v1", auth: authClient });
-    const fixedCount = await fixTextOverflow(slides, presentation_id);
-
-    return res.json({
-      success: true,
-      presentation_id,
-      fixed_text_boxes: fixedCount,
-      message: `Auto-fit aplicado a ${fixedCount} cajas de texto`,
-    });
-  } catch (error) {
-    console.error("❌ Error en /fix-text:", error.message);
-    return res.status(500).json({
-      error: "Error ajustando textos",
       details: error.message,
     });
   }
