@@ -482,6 +482,10 @@ app.post("/webhook/generate-vt", async (req, res) => {
   console.log("📦 [VT] Body recibido:", JSON.stringify(req.body, null, 2));
   const data = req.body;
 
+  // Normalizar campos que pueden llegar como arrays (linked records)
+  if (Array.isArray(data.titulo)) data.titulo = data.titulo[0] || "";
+  if (Array.isArray(data.establecimiento)) data.establecimiento = data.establecimiento[0] || "";
+
   if (!data.nombre || !data.rut) {
     return res.status(400).json({ error: "Faltan campos requeridos: nombre, rut" });
   }
@@ -491,8 +495,34 @@ app.post("/webhook/generate-vt", async (req, res) => {
     console.log(`📄 Generando VT para: ${data.nombre}`);
     const coverBuffer = await buildCoverPage(data);
 
-    // 2. Descargar documentos adjuntos
-    const documentBuffers = await downloadAttachments(data.documentos);
+    // 2. Obtener URLs reales de documentos desde Airtable API
+    let documentBuffers = [];
+    const vtBaseId = process.env.VT_AIRTABLE_BASE_ID || process.env.AIRTABLE_BASE_ID;
+    const vtTableName = process.env.VT_AIRTABLE_TABLE_NAME || "Documentos";
+    const vtDocField = process.env.VT_AIRTABLE_DOC_FIELD || "Documentos";
+
+    if (data.recordId && AIRTABLE_API_KEY) {
+      console.log(`🔍 Obteniendo attachments reales desde Airtable para: ${data.recordId}`);
+      try {
+        const recordUrl = `https://api.airtable.com/v0/${vtBaseId}/${encodeURIComponent(vtTableName)}/${data.recordId}`;
+        const recordRes = await axios.get(recordUrl, {
+          headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
+          timeout: 15000,
+        });
+
+        const docField = recordRes.data.fields[vtDocField];
+        if (docField && Array.isArray(docField)) {
+          const realUrls = docField.map((att) => att.url).filter(Boolean);
+          console.log(`📎 ${realUrls.length} documentos encontrados via API`);
+          documentBuffers = await downloadAttachments(realUrls);
+        }
+      } catch (err) {
+        console.error(`⚠️  Error obteniendo attachments de Airtable: ${err.message}`);
+      }
+    } else if (data.documentos) {
+      // Fallback: usar URLs directas si vienen
+      documentBuffers = await downloadAttachments(data.documentos);
+    }
     console.log(`📎 ${documentBuffers.length} documentos descargados`);
 
     // 3. Merge todo en un solo PDF
