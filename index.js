@@ -111,7 +111,7 @@ async function fixTextOverflow(slides, presentationId) {
               autofitType: "TEXT_AUTOFIT",
             },
           },
-          fields: "autofit",
+          fields: "autofit.autofitType",
         },
       });
     }
