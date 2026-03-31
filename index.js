@@ -157,35 +157,39 @@ app.post("/insert-photo", async (req, res) => {
     const contentType = imageResponse.headers["content-type"] || "unknown";
     console.log(`✅ Imagen descargada (${imageBuffer.length} bytes, tipo: ${contentType})`);
 
-    // ── 2. Redimensionar a cuadrado ────────────────────────────────────────
-    // Forzar conversión a PNG primero para manejar cualquier formato
-    const normalizedBuffer = await sharp(imageBuffer, { failOn: "none" })
-      .png()
-      .toBuffer();
+    // ── 2. Subir imagen a Google Drive (para que Slides pueda leerla) ─────
+    const authClient = await auth.getClient();
+    const drive = google.drive({ version: "v3", auth: authClient });
 
-    const processedImage = await sharp(normalizedBuffer)
+    // Redimensionar a cuadrado
+    const processedImage = await sharp(imageBuffer, { failOn: "none" })
       .resize(FACE_PX, FACE_PX, { fit: "cover", position: "centre" })
       .jpeg({ quality: 92 })
       .toBuffer();
 
     console.log(`✂️  Imagen redimensionada a ${FACE_PX}×${FACE_PX}px`);
 
-    // ── 3. Subir imagen procesada a Google Drive (pública) ─────────────────
-    const authClient = await auth.getClient();
-    const drive = google.drive({ version: "v3", auth: authClient });
+    // Subir a la misma carpeta de la presentación en Drive
+    const presentationFile = await drive.files.get({
+      fileId: presentation_id,
+      fields: "parents",
+    });
+    const parentFolder = presentationFile.data.parents?.[0];
 
-    const driveResponse = await drive.files.create({
+    const uploadParams = {
       requestBody: {
         name: `foto-candidato-${Date.now()}.jpg`,
         mimeType: "image/jpeg",
+        ...(parentFolder && { parents: [parentFolder] }),
       },
       media: {
         mimeType: "image/jpeg",
         body: Readable.from(processedImage),
       },
       fields: "id",
-    });
+    };
 
+    const driveResponse = await drive.files.create(uploadParams);
     driveFileId = driveResponse.data.id;
 
     // Hacer el archivo público (necesario para que Slides API lo lea)
