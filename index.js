@@ -453,50 +453,43 @@ async function mergePDFs(coverBuffer, documentBuffers) {
 }
 
 // Agregar logo como header a todas las páginas del PDF final
-// Desplaza el contenido original hacia abajo para no superponerse
+// Copia cada página, la hace más alta, mueve el contenido abajo y pone el logo arriba
 async function addLogoHeader(pdfBuffer) {
   if (!fs.existsSync(LOGO_PATH)) return pdfBuffer;
 
   const srcDoc = await PDFLib.load(pdfBuffer);
-  const logoBytes = fs.readFileSync(LOGO_PATH);
-
   const destDoc = await PDFLib.create();
+
+  const logoBytes = fs.readFileSync(LOGO_PATH);
   const logo = await destDoc.embedPng(logoBytes);
 
   const logoW = 150;
   const logoH = (logo.height / logo.width) * logoW;
-  const headerSpace = logoH + 30; // espacio para logo + margen
+  const headerSpace = logoH + 30;
 
-  const srcPages = srcDoc.getPages();
+  const pageCount = srcDoc.getPageCount();
 
-  for (let i = 0; i < srcPages.length; i++) {
-    const srcPage = srcPages[i];
-    const { width, height } = srcPage.getSize();
+  for (let i = 0; i < pageCount; i++) {
+    const [copiedPage] = await destDoc.copyPages(srcDoc, [i]);
 
     if (i === 0) {
-      // Portada: copiar tal cual (ya tiene su propio logo)
-      const [copied] = await destDoc.copyPages(srcDoc, [i]);
-      destDoc.addPage(copied);
+      // Portada: copiar tal cual
+      destDoc.addPage(copiedPage);
     } else {
-      // Páginas 2+: crear página más alta, embeber original desplazada abajo
-      const [embedded] = await destDoc.embedPages(srcDoc, [i]);
-      const newPage = destDoc.addPage([width, height + headerSpace]);
-
-      // Dibujar contenido original desplazado hacia abajo
-      newPage.drawPage(embedded, {
-        x: 0,
-        y: 0,
-        width: width,
-        height: height,
-      });
+      // Páginas 2+: agrandar página y mover contenido abajo
+      const { width, height } = copiedPage.getSize();
+      copiedPage.setSize(width, height + headerSpace);
+      copiedPage.translateContent(0, 0);
 
       // Dibujar logo centrado en el espacio superior
-      newPage.drawImage(logo, {
+      copiedPage.drawImage(logo, {
         x: (width - logoW) / 2,
         y: height + (headerSpace - logoH) / 2,
         width: logoW,
         height: logoH,
       });
+
+      destDoc.addPage(copiedPage);
     }
   }
 
