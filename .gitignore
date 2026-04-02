@@ -4,12 +4,7 @@ credentials.json
 *.pdf
 !88597*HVC*.pdf
 !Hoja84571-HVC*.pdf
-!unab-*.pdf
-!UTarapaca.pdf
-!U?valparaiso.pdf
-!U?de?las?americas*.pdf
-!IACC*.pdf
-!U?de?Aconcagua*.pdf
+!assets/*.pdf
 *.pptx
 tmp-pdfs/
 INSTRUCCIONES-VPS (1)

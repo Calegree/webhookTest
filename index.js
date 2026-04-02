@@ -679,12 +679,11 @@ const { validarTitulo } = require("./lib/titulo-validators");
 const { listarUniversidades } = require("./lib/universidades");
 
 const TEST_TITULOS = {
-  unab: path.join(__dirname, "unab-169900868-1418041.pdf"),
-  udla: path.join(__dirname, "U de las americas CertificadodeTitulo.pdf"),
-  iacc: path.join(__dirname, "IACC - TituloTraicyMoreno.pdf"),
-  uta: path.join(__dirname, "UTarapaca.pdf"),
-  ucv: path.join(__dirname, "U valparaiso.pdf"),
-  uac: path.join(__dirname, "U de Aconcagua CertificadoMauricioSantander.pdf"),
+  unab: path.join(__dirname, "assets", "unab-169900868-1418041.pdf"),
+  udla: path.join(__dirname, "assets", "U de las americas CertificadodeTitulo.pdf"),
+  uta: path.join(__dirname, "assets", "U tarapaca TituloHansRoaMendoza.pdf"),
+  ucv: path.join(__dirname, "assets", "U Catolica Valpo TituloDiegoCancinoSilva.pdf"),
+  uac: path.join(__dirname, "assets", "U aconcagua CertificadoTitulo.pdf"),
 };
 
 app.get("/test/validate-titulo/:archivo", async (req, res) => {
@@ -709,11 +708,26 @@ app.get("/test/validate-titulo/:archivo", async (req, res) => {
     console.log(`   🏫 Universidad: ${data.universidad || "No detectada"}`);
     console.log(`   📋 Folio: ${data.folio || "-"} | ID: ${data.id_alumno || "-"} | CVE: ${data.codigo || "-"}`);
 
-    // 2. Verificar en el validador de la universidad
+    // 2. Verificar si es documento físico escaneado
+    if (data.es_documento_fisico) {
+      console.log("   📷 Documento físico detectado (sin código digital)");
+      return res.json({
+        estado: "REQUIERE CERTIFICADO DIGITAL",
+        datos_extraidos: {
+          universidad: data.universidad,
+          nombre: data.nombre,
+          rut: data.rut,
+          titulo: data.titulo,
+          es_documento_fisico: true,
+        },
+        mensaje: data.mensaje,
+      });
+    }
+
+    // 3. Verificar en el validador de la universidad
     let verificacion = { valido: null, mensaje: "No se pudo validar", detalles: "" };
 
     if (data.universidad_key) {
-      // Verificar que tenemos los campos necesarios
       const { UNIVERSIDADES } = require("./lib/universidades");
       const uni = UNIVERSIDADES[data.universidad_key];
       const camposFaltantes = uni.campos.filter((c) => !data[c]);
@@ -731,7 +745,7 @@ app.get("/test/validate-titulo/:archivo", async (req, res) => {
       console.log("   ⚠️ Universidad no mapeada");
     }
 
-    // 3. Estado final
+    // 4. Estado final
     let estado = "REQUIERE REVISIÓN";
     if (verificacion.valido === true) estado = "APROBADO";
     if (verificacion.valido === false) estado = "RECHAZADO";
@@ -747,6 +761,7 @@ app.get("/test/validate-titulo/:archivo", async (req, res) => {
         id_alumno: data.id_alumno,
         codigo: data.codigo,
         fecha_emision: data.fecha_emision,
+        es_documento_fisico: false,
       },
       verificacion_universidad: verificacion,
     };
