@@ -49,7 +49,7 @@ const FACE_PX = 500; // resolución interna alta para buena calidad
 const tempImages = new Map();
 
 // ─── Recorte de rostro desde carnet chileno ──────────────────────────────────
-async function cropFaceFromCarnet(imageBuffer, targetAspect) {
+async function cropFaceFromCarnet(imageBuffer) {
   const meta = await sharp(imageBuffer, { failOn: "none" }).metadata();
   const w = meta.width;
   const h = meta.height;
@@ -72,17 +72,17 @@ async function cropFaceFromCarnet(imageBuffer, targetAspect) {
     })
     .toBuffer();
 
-  // Calcular dimensiones de salida según el aspect ratio del placeholder
-  const aspect = targetAspect || 1;
+  // Usar aspect ratio de retrato (3:4) para no cortar barbilla ni frente
+  // Esto hace que la imagen sea más alta que ancha, capturando cara completa
   const outW = FACE_PX;
-  const outH = Math.round(FACE_PX / aspect);
+  const outH = Math.round(FACE_PX * 1.33); // ratio 3:4 (retrato)
 
   const processedImage = await sharp(faceRegion)
-    .resize(outW, outH, { fit: "cover", position: "centre" })
+    .resize(outW, outH, { fit: "cover", position: "top" })
     .jpeg({ quality: 95 })
     .toBuffer();
 
-  console.log(`✂️  Rostro recortado a ${outW}×${outH}px (aspect: ${aspect.toFixed(2)})`);
+  console.log(`✂️  Rostro recortado a ${outW}×${outH}px (retrato 3:4)`);
   return processedImage;
 }
 
