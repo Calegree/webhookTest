@@ -54,12 +54,12 @@ async function cropFaceFromCarnet(imageBuffer, targetAspect) {
   const w = meta.width;
   const h = meta.height;
 
-  // Zona ajustada para capturar solo la cara sin letras ni números
-  // Carnet chileno: foto en la zona izquierda, bajar el inicio y recortar derecha
+  // Zona ajustada para capturar la cara completa (frente a barbilla)
+  // Carnet chileno: foto en la zona izquierda
   const cropLeft = Math.round(w * 0.04);
-  const cropTop = Math.round(h * 0.18);
+  const cropTop = Math.round(h * 0.12);
   const cropWidth = Math.round(w * 0.26);
-  const cropHeight = Math.round(h * 0.55);
+  const cropHeight = Math.round(h * 0.65);
 
   console.log(`📐 Imagen original: ${w}×${h}px, recortando cara: ${cropWidth}×${cropHeight}px desde (${cropLeft},${cropTop})`);
 
