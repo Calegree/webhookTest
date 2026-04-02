@@ -2,5 +2,7 @@ node_modules/
 credentials.json
 .env
 *.pdf
+!88597*HVC*.pdf
+!Hoja84571-HVC*.pdf
 *.pptx
 tmp-pdfs/
