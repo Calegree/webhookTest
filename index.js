@@ -596,6 +596,117 @@ app.get("/tmp/:id.pdf", (req, res) => {
   res.sendFile(pdfFilePath);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /test/validate-hvc/:nombre — Test manual de validación HVC (sin Airtable)
+// ─────────────────────────────────────────────────────────────────────────────
+const { extractLicenseData } = require("./lib/claude-vision");
+const { verificarCertificado } = require("./lib/registro-civil");
+const { isValidRut } = require("./lib/rut-utils");
+
+const TEST_PDFS = {
+  maria: path.join(__dirname, "88597 - HVC - María Fernández Robles.pdf"),
+  nelson: path.join(__dirname, "Hoja84571-HVC-NELSONDAVIDARRIAGADACORTES.pdf"),
+};
+
+app.get("/test/validate-hvc/:nombre", async (req, res) => {
+  const nombre = req.params.nombre.toLowerCase();
+  const pdfPath = TEST_PDFS[nombre];
+
+  if (!pdfPath || !fs.existsSync(pdfPath)) {
+    return res.status(404).json({
+      error: `PDF no encontrado para "${nombre}"`,
+      disponibles: Object.keys(TEST_PDFS),
+    });
+  }
+
+  console.log(`\n🧪 [TEST HVC] Iniciando validación para: ${nombre}`);
+  console.log(`   📄 Archivo: ${path.basename(pdfPath)}`);
+
+  try {
+    // 1. Extraer datos del PDF
+    console.log("   📝 Extrayendo datos del PDF...");
+    const pdfBuffer = fs.readFileSync(pdfPath);
+    const data = await extractLicenseData(pdfBuffer);
+    console.log(`   ✅ Extraído: Folio=${data.folio}, CVE=${data.codigo_verificacion}, RUT=${data.rut}`);
+
+    // 2. Verificar en Registro Civil
+    let verificacion = { valido: null, mensaje: "No verificado", detalles: "" };
+    if (data.folio && data.codigo_verificacion) {
+      console.log("   🔍 Verificando en Registro Civil...");
+      verificacion = await verificarCertificado(data.folio, data.codigo_verificacion);
+      console.log(`   📋 Resultado: ${verificacion.mensaje}`);
+    } else {
+      console.log("   ⚠️ Sin folio/CVE, no se puede verificar en RC");
+    }
+
+    // 3. Determinar estado
+    let estado = "REQUIERE REVISIÓN";
+    if (verificacion.valido === true) estado = "APROBADO";
+    if (verificacion.valido === false) estado = "RECHAZADO";
+
+    const resultado = {
+      estado,
+      datos_extraidos: {
+        folio: data.folio,
+        codigo_verificacion: data.codigo_verificacion,
+        nombre: data.nombre_completo,
+        rut: data.rut,
+        rut_valido: data.rut ? isValidRut(data.rut) : null,
+        clase_licencia: data.ultima_clase,
+        municipalidad: data.ultima_municipalidad,
+        fecha_emision: data.fecha_emision,
+        antecedentes_prn: data.antecedentes_prn,
+        antecedentes_rnc: data.antecedentes_rnc,
+        tiene_restricciones: data.tiene_restricciones,
+        anotaciones: data.anotaciones,
+      },
+      verificacion_registro_civil: verificacion,
+    };
+
+    console.log(`   ✅ [TEST HVC] Completado: ${estado}\n`);
+    return res.json(resultado);
+  } catch (err) {
+    console.error(`   ❌ [TEST HVC] Error: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /webhook/validate-license — Valida Hoja de Vida del Conductor (Airtable)
+// ─────────────────────────────────────────────────────────────────────────────
+const { validateDriverLicense } = require("./lib/license-validator");
+
+app.post("/webhook/validate-license", async (req, res) => {
+  console.log("📦 [HVC] Body recibido:", JSON.stringify(req.body, null, 2));
+  const { recordId, rutEsperado } = req.body;
+
+  if (!recordId) {
+    return res.status(400).json({ error: "Falta campo requerido: recordId" });
+  }
+
+  const baseId = process.env.HVC_AIRTABLE_BASE_ID || process.env.AIRTABLE_BASE_ID;
+  const tableName = process.env.HVC_AIRTABLE_TABLE_NAME || "Conductores";
+  const pdfField = process.env.HVC_AIRTABLE_PDF_FIELD || "HVC";
+  const statusField = process.env.HVC_AIRTABLE_STATUS_FIELD || "Estado HVC";
+  const resultField = process.env.HVC_AIRTABLE_RESULT_FIELD || "Resultado HVC";
+
+  // Responder inmediatamente (el proceso puede tomar 15-30s)
+  res.json({ status: "processing", recordId });
+
+  // Procesar en background
+  validateDriverLicense({
+    recordId,
+    baseId,
+    tableName,
+    pdfField,
+    statusField,
+    resultField,
+    rutEsperado,
+  }).catch((err) => {
+    console.error("❌ [HVC] Error no capturado:", err.message);
+  });
+});
+
 // ─── Arranque del servidor ───────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
