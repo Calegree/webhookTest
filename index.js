@@ -681,7 +681,7 @@ const { listarUniversidades } = require("./lib/universidades");
 const TEST_TITULOS = {
   unab: path.join(__dirname, "assets", "unab-169900868-1418041.pdf"),
   udla: path.join(__dirname, "assets", "U de las americas CertificadodeTitulo.pdf"),
-  uta: path.join(__dirname, "assets", "U tarapaca TituloHansRoaMendoza.pdf"),
+  uta: path.join(__dirname, "assets", "U tarapaca CertificadodeTtulo.pdf"),
   ucv: path.join(__dirname, "assets", "U Catolica Valpo TituloDiegoCancinoSilva.pdf"),
   uac: path.join(__dirname, "assets", "U aconcagua CertificadoTitulo.pdf"),
 };
