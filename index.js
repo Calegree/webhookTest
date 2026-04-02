@@ -672,6 +672,99 @@ app.get("/test/validate-hvc/:nombre", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /test/validate-titulo/:archivo — Test manual de validación de título
+// ─────────────────────────────────────────────────────────────────────────────
+const { extractTituloData } = require("./lib/titulo-extractor");
+const { validarTitulo } = require("./lib/titulo-validators");
+const { listarUniversidades } = require("./lib/universidades");
+
+const TEST_TITULOS = {
+  unab: path.join(__dirname, "unab-169900868-1418041.pdf"),
+  udla: path.join(__dirname, "U de las americas CertificadodeTitulo.pdf"),
+  iacc: path.join(__dirname, "IACC - TituloTraicyMoreno.pdf"),
+  uta: path.join(__dirname, "UTarapaca.pdf"),
+  ucv: path.join(__dirname, "U valparaiso.pdf"),
+  uac: path.join(__dirname, "U de Aconcagua CertificadoMauricioSantander.pdf"),
+};
+
+app.get("/test/validate-titulo/:archivo", async (req, res) => {
+  const archivo = req.params.archivo.toLowerCase();
+  const pdfPath = TEST_TITULOS[archivo];
+
+  if (!pdfPath || !fs.existsSync(pdfPath)) {
+    return res.status(404).json({
+      error: `PDF no encontrado para "${archivo}"`,
+      disponibles: Object.keys(TEST_TITULOS),
+    });
+  }
+
+  console.log(`\n🧪 [TEST TÍTULO] Validando: ${archivo}`);
+
+  try {
+    // 1. Extraer datos del PDF
+    console.log("   📝 Extrayendo datos del PDF...");
+    const pdfBuffer = fs.readFileSync(pdfPath);
+    const data = await extractTituloData(pdfBuffer);
+
+    console.log(`   🏫 Universidad: ${data.universidad || "No detectada"}`);
+    console.log(`   📋 Folio: ${data.folio || "-"} | ID: ${data.id_alumno || "-"} | CVE: ${data.codigo || "-"}`);
+
+    // 2. Verificar en el validador de la universidad
+    let verificacion = { valido: null, mensaje: "No se pudo validar", detalles: "" };
+
+    if (data.universidad_key) {
+      // Verificar que tenemos los campos necesarios
+      const { UNIVERSIDADES } = require("./lib/universidades");
+      const uni = UNIVERSIDADES[data.universidad_key];
+      const camposFaltantes = uni.campos.filter((c) => !data[c]);
+
+      if (camposFaltantes.length === 0) {
+        console.log(`   🔍 Validando en ${uni.url}...`);
+        verificacion = await validarTitulo(data.universidad_key, data);
+        console.log(`   📋 Resultado: ${verificacion.mensaje}`);
+      } else {
+        verificacion.mensaje = `Faltan datos para validar: ${camposFaltantes.join(", ")}`;
+        console.log(`   ⚠️ ${verificacion.mensaje}`);
+      }
+    } else {
+      verificacion.mensaje = "Universidad no detectada o sin validador implementado";
+      console.log("   ⚠️ Universidad no mapeada");
+    }
+
+    // 3. Estado final
+    let estado = "REQUIERE REVISIÓN";
+    if (verificacion.valido === true) estado = "APROBADO";
+    if (verificacion.valido === false) estado = "RECHAZADO";
+
+    const resultado = {
+      estado,
+      datos_extraidos: {
+        universidad: data.universidad,
+        nombre: data.nombre,
+        rut: data.rut,
+        titulo: data.titulo,
+        folio: data.folio,
+        id_alumno: data.id_alumno,
+        codigo: data.codigo,
+        fecha_emision: data.fecha_emision,
+      },
+      verificacion_universidad: verificacion,
+    };
+
+    console.log(`   ✅ [TEST TÍTULO] Completado: ${estado}\n`);
+    return res.json(resultado);
+  } catch (err) {
+    console.error(`   ❌ [TEST TÍTULO] Error: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar universidades disponibles
+app.get("/test/universidades", (req, res) => {
+  res.json(listarUniversidades());
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /webhook/validate-license — Valida Hoja de Vida del Conductor (Airtable)
 // ─────────────────────────────────────────────────────────────────────────────
 const { validateDriverLicense } = require("./lib/license-validator");
