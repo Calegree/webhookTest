@@ -819,6 +819,435 @@ app.post("/webhook/validate-license", async (req, res) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /webhook/pandadoc-documents — PandaDoc → PDFs combinados → Airtable
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Genera un PDF combinado a partir de múltiples archivos (imágenes o PDFs)
+// con el logo de la empresa en el encabezado de cada página
+async function generateCombinedPdfWithLogo(files, logoBytes) {
+  const merged = await PDFLib.create();
+
+  for (const file of files) {
+    try {
+      // Intentar cargar como PDF
+      const srcPdf = await PDFLib.load(file.buffer, { ignoreEncryption: true });
+      const pages = await merged.copyPages(srcPdf, srcPdf.getPageIndices());
+      for (const p of pages) merged.addPage(p);
+    } catch {
+      // No es PDF → intentar como imagen
+      try {
+        let img;
+        const header = file.buffer.slice(0, 4).toString("hex");
+        if (header.startsWith("89504e47")) {
+          img = await merged.embedPng(file.buffer);
+        } else {
+          img = await merged.embedJpg(file.buffer);
+        }
+        const page = merged.addPage();
+        const { width: pw, height: ph } = page.getSize();
+        const scale = Math.min((pw - 60) / img.width, (ph - 100) / img.height, 1);
+        const iw = img.width * scale;
+        const ih = img.height * scale;
+        page.drawImage(img, {
+          x: (pw - iw) / 2,
+          y: (ph - ih) / 2 - 30,
+          width: iw,
+          height: ih,
+        });
+      } catch (imgErr) {
+        console.error(`  ⚠️ No se pudo procesar archivo ${file.fileName}: ${imgErr.message}`);
+      }
+    }
+  }
+
+  // Agregar logo en encabezado de cada página
+  if (logoBytes && merged.getPageCount() > 0) {
+    const srcDoc = await PDFLib.load(await merged.save());
+    const destDoc = await PDFLib.create();
+    const logo = await destDoc.embedPng(logoBytes);
+    const logoW = 150;
+    const logoH = (logo.height / logo.width) * logoW;
+    const headerSpace = logoH + 30;
+
+    for (let i = 0; i < srcDoc.getPageCount(); i++) {
+      const [copiedPage] = await destDoc.copyPages(srcDoc, [i]);
+      const { width, height } = copiedPage.getSize();
+      copiedPage.setSize(width, height + headerSpace);
+      copiedPage.drawImage(logo, {
+        x: (width - logoW) / 2,
+        y: height + (headerSpace - logoH) / 2,
+        width: logoW,
+        height: logoH,
+      });
+      destDoc.addPage(copiedPage);
+    }
+    return Buffer.from(await destDoc.save());
+  }
+
+  return Buffer.from(await merged.save());
+}
+
+// Clasifica archivos según el nombre del campo de PandaDoc
+function classifyDocFiles(files) {
+  const result = {
+    ciFront: null,
+    ciBack: null,
+    titulo: null,
+    licFront: null,
+    licBack: null,
+    hvc: null,
+    otros: [],
+  };
+
+  for (const file of files) {
+    const name = (file.fieldName || "").toLowerCase();
+    console.log(`  📂 Clasificando: "${file.fieldName}" → ${file.fileName}`);
+
+    if (/c[eé]dula.*frente|ci.*front|identidad.*frente/i.test(name)) {
+      result.ciFront = file;
+    } else if (/c[eé]dula.*reverso|ci.*back|ci.*rever|identidad.*reverso/i.test(name)) {
+      result.ciBack = file;
+    } else if (/t[ií]tulo/i.test(name)) {
+      result.titulo = file;
+    } else if (/licencia.*frente|lic.*front/i.test(name)) {
+      result.licFront = file;
+    } else if (/licencia.*reverso|lic.*back|lic.*rever/i.test(name)) {
+      result.licBack = file;
+    } else if (/hoja\s*de\s*vida|conductor/i.test(name)) {
+      result.hvc = file;
+    } else if (/otro/i.test(name) || name === "") {
+      result.otros.push(file);
+    } else {
+      // No coincide con ningún patrón conocido → va a otros
+      console.log(`    ⚠️ Campo no reconocido, va a "otros"`);
+      result.otros.push(file);
+    }
+  }
+
+  return result;
+}
+
+// Procesa el documento de PandaDoc: descarga archivos, genera PDFs, sube a Airtable
+async function processPandaDocDocuments(body, query) {
+  const pandadocApiKey = process.env.PANDADOC_API_KEY_DOCUMENTS;
+  const airtableApiKey = process.env.AIRTABLE_API_KEY_DOCUMENTS;
+  const airtableBaseId = process.env.AIRTABLE_BASE_ID_DOCUMENTS;
+  const airtableTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS;
+
+  // ── 1. Extraer document ID del webhook ──
+  const docData = Array.isArray(body.data) ? body.data[0] : (body.data || body);
+  const documentId = docData.id || body.id;
+
+  if (!documentId) {
+    console.error("❌ [PANDADOC-DOCS] No se encontró document ID en el payload");
+    return;
+  }
+
+  const status = docData.status || body.event || "";
+  console.log(`📄 Document ID: ${documentId} | Status: ${status}`);
+
+  // Solo procesar documentos completados
+  if (status && !status.includes("completed") && !status.includes("document.completed")) {
+    console.log(`⏭️ Evento ignorado (no es completed): ${status}`);
+    return;
+  }
+
+  // ── 2. Obtener detalles del documento de PandaDoc ──
+  console.log("🔍 Obteniendo detalles del documento...");
+  let docDetails;
+  try {
+    const detailsRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/details`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    docDetails = detailsRes.data;
+    console.log("📋 Respuesta de PandaDoc (primeros 3000 chars):");
+    console.log(JSON.stringify(docDetails, null, 2).substring(0, 3000));
+  } catch (err) {
+    console.error("❌ Error obteniendo detalles:", err.response?.data || err.message);
+    return;
+  }
+
+  // ── 3. Extraer archivos subidos desde los campos del documento ──
+  const uploadedFiles = [];
+
+  // Estrategia A: buscar en fields[]
+  const fields = docDetails.fields || [];
+  for (const field of fields) {
+    if (field.value && typeof field.value === "object" && field.value.url) {
+      uploadedFiles.push({
+        fieldName: field.name || field.title || field.api_id || "",
+        fileName: field.value.file_name || field.value.name || "archivo",
+        url: field.value.url,
+        mimeType: field.value.content_type || field.value.mime_type || "",
+      });
+    } else if (field.value && typeof field.value === "string" && field.value.startsWith("http")) {
+      uploadedFiles.push({
+        fieldName: field.name || field.title || field.api_id || "",
+        fileName: field.name || "archivo",
+        url: field.value,
+        mimeType: "",
+      });
+    }
+  }
+
+  // Estrategia B: buscar en tokens[]
+  const tokens = docDetails.tokens || [];
+  for (const token of tokens) {
+    if (token.value && typeof token.value === "object" && token.value.url) {
+      uploadedFiles.push({
+        fieldName: token.name || token.token_id || "",
+        fileName: token.value.file_name || token.value.name || "archivo",
+        url: token.value.url,
+        mimeType: token.value.content_type || "",
+      });
+    }
+  }
+
+  // Estrategia C: buscar en content_uploads[] o attachments[]
+  const contentUploads = docDetails.content_uploads || docDetails.attachments || [];
+  for (const att of contentUploads) {
+    uploadedFiles.push({
+      fieldName: att.field_name || att.name || att.title || "",
+      fileName: att.file_name || att.name || "archivo",
+      url: att.download_url || att.url || "",
+      mimeType: att.content_type || att.mime_type || "",
+    });
+  }
+
+  console.log(`📎 Archivos encontrados: ${uploadedFiles.length}`);
+
+  if (uploadedFiles.length === 0) {
+    console.error("❌ No se encontraron archivos subidos en el documento");
+    console.log("💡 Revisa los logs de arriba para ver la estructura de la respuesta de PandaDoc");
+    console.log("💡 Los nombres de campos de upload en tu plantilla deben coincidir con los patrones del código");
+    return;
+  }
+
+  // ── 4. Descargar archivos ──
+  console.log("📥 Descargando archivos...");
+  for (const file of uploadedFiles) {
+    if (!file.url) {
+      console.error(`  ⚠️ Sin URL para: ${file.fieldName}`);
+      continue;
+    }
+    try {
+      const response = await axios.get(file.url, {
+        responseType: "arraybuffer",
+        headers: { Authorization: `API-Key ${pandadocApiKey}` },
+        timeout: 60000,
+      });
+      file.buffer = Buffer.from(response.data);
+      // Detectar mime type por magic bytes si no viene
+      if (!file.mimeType) {
+        const hdr = file.buffer.slice(0, 4).toString("hex");
+        if (hdr.startsWith("89504e47")) file.mimeType = "image/png";
+        else if (hdr.startsWith("ffd8ff")) file.mimeType = "image/jpeg";
+        else if (hdr.startsWith("25504446")) file.mimeType = "application/pdf";
+      }
+      console.log(`  ✅ ${file.fieldName}: ${file.fileName} (${file.buffer.length} bytes, ${file.mimeType})`);
+    } catch (err) {
+      console.error(`  ❌ Error descargando "${file.fieldName}": ${err.message}`);
+    }
+  }
+
+  const validFiles = uploadedFiles.filter((f) => f.buffer);
+  if (validFiles.length === 0) {
+    console.error("❌ No se pudo descargar ningún archivo");
+    return;
+  }
+
+  // ── 5. Clasificar archivos ──
+  console.log("📂 Clasificando archivos...");
+  const classified = classifyDocFiles(validFiles);
+
+  // ── 6. Generar PDFs con logo ──
+  const logoBytes = fs.existsSync(LOGO_PATH) ? fs.readFileSync(LOGO_PATH) : null;
+  if (!logoBytes) console.warn("⚠️ Logo no encontrado en", LOGO_PATH);
+
+  const generatedPdfs = [];
+
+  // CI.pdf → frente + reverso cédula
+  if (classified.ciFront || classified.ciBack) {
+    const ciFiles = [classified.ciFront, classified.ciBack].filter(Boolean);
+    const pdf = await generateCombinedPdfWithLogo(ciFiles, logoBytes);
+    generatedPdfs.push({ filename: "CI.pdf", buffer: pdf });
+    console.log("📄 CI.pdf generado");
+  }
+
+  // Titulo.pdf
+  if (classified.titulo) {
+    const pdf = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
+    generatedPdfs.push({ filename: "Titulo.pdf", buffer: pdf });
+    console.log("📄 Titulo.pdf generado");
+  }
+
+  // Licencia.pdf → frente + reverso (solo si existen)
+  if (classified.licFront || classified.licBack) {
+    const licFiles = [classified.licFront, classified.licBack].filter(Boolean);
+    const pdf = await generateCombinedPdfWithLogo(licFiles, logoBytes);
+    generatedPdfs.push({ filename: "Licencia.pdf", buffer: pdf });
+    console.log("📄 Licencia.pdf generado");
+  }
+
+  // HojaVidaConductor.pdf
+  if (classified.hvc) {
+    const pdf = await generateCombinedPdfWithLogo([classified.hvc], logoBytes);
+    generatedPdfs.push({ filename: "HojaVidaConductor.pdf", buffer: pdf });
+    console.log("📄 HojaVidaConductor.pdf generado");
+  }
+
+  // Otros documentos
+  for (let i = 0; i < classified.otros.length; i++) {
+    const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
+    const filename = classified.otros[i].fileName
+      ? `Otro_${i + 1}_${classified.otros[i].fileName.replace(/\.[^.]+$/, "")}.pdf`
+      : `Otro_${i + 1}.pdf`;
+    generatedPdfs.push({ filename, buffer: pdf });
+    console.log(`📄 ${filename} generado`);
+  }
+
+  if (generatedPdfs.length === 0) {
+    console.error("❌ No se generaron PDFs");
+    return;
+  }
+
+  // ── 7. Guardar PDFs temporalmente para que Airtable los descargue ──
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : (process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`);
+
+  const tmpDir = path.join(__dirname, "tmp-pdfs");
+  if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
+
+  const pdfAttachments = [];
+  const tmpPaths = [];
+
+  for (const pdf of generatedPdfs) {
+    const pdfId = crypto.randomUUID();
+    const pdfPath = path.join(tmpDir, `${pdfId}.pdf`);
+    fs.writeFileSync(pdfPath, pdf.buffer);
+    tmpPaths.push(pdfPath);
+    pdfAttachments.push({
+      url: `${baseUrl}/tmp/${pdfId}.pdf`,
+      filename: pdf.filename,
+    });
+    console.log(`  🌐 ${pdf.filename} → ${baseUrl}/tmp/${pdfId}.pdf`);
+  }
+
+  // ── 8. Determinar el registro de Airtable ──
+  let recordId = query.recordId;
+
+  // Intentar extraer de metadata de PandaDoc
+  if (!recordId && docDetails.metadata) {
+    recordId = docDetails.metadata.airtable_record_id || docDetails.metadata.recordId;
+  }
+
+  // Intentar extraer de tags de PandaDoc
+  if (!recordId && docDetails.tags) {
+    const tag = (docDetails.tags || []).find((t) => typeof t === "string" && t.startsWith("rec"));
+    if (tag) recordId = tag;
+  }
+
+  // Intentar buscar por el nombre del documento que podría contener el ID del proceso
+  if (!recordId && docDetails.name) {
+    const idMatch = docDetails.name.match(/\b(\d{4,6})\b/);
+    if (idMatch) {
+      const processId = idMatch[1];
+      console.log(`🔍 Buscando en Airtable por ID de proceso: ${processId}`);
+      try {
+        const searchRes = await axios.get(
+          `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}`,
+          {
+            headers: { Authorization: `Bearer ${airtableApiKey}` },
+            params: { filterByFormula: `{ID} = "${processId}"`, maxRecords: 1 },
+            timeout: 15000,
+          }
+        );
+        if (searchRes.data.records.length > 0) {
+          recordId = searchRes.data.records[0].id;
+          console.log(`✅ Registro encontrado por ID ${processId}: ${recordId}`);
+        }
+      } catch (err) {
+        console.error(`⚠️ Error buscando en Airtable: ${err.message}`);
+      }
+    }
+  }
+
+  if (!recordId) {
+    console.error("❌ No se pudo determinar el registro de Airtable");
+    console.log("💡 Opciones:");
+    console.log("   1. Pasar recordId como query param: /webhook/pandadoc-documents?recordId=recXXXXX");
+    console.log("   2. Agregar metadata en PandaDoc con key 'airtable_record_id'");
+    console.log("   3. Incluir el ID del proceso (ej: 88741) en el nombre del documento PandaDoc");
+    // Limpiar temporales
+    setTimeout(() => tmpPaths.forEach((p) => { try { fs.unlinkSync(p); } catch {} }), 60000);
+    return;
+  }
+
+  // ── 9. Obtener attachments existentes en Airtable (para no sobreescribir) ──
+  let existingAttachments = [];
+  try {
+    const recordRes = await axios.get(
+      `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
+      { headers: { Authorization: `Bearer ${airtableApiKey}` }, timeout: 15000 }
+    );
+    const currentDocs = recordRes.data.fields?.Documentos;
+    if (Array.isArray(currentDocs)) {
+      existingAttachments = currentDocs.map((att) => ({ url: att.url }));
+      console.log(`📎 ${existingAttachments.length} attachments existentes en Airtable`);
+    }
+  } catch (err) {
+    console.warn(`⚠️ No se pudieron obtener attachments existentes: ${err.message}`);
+  }
+
+  // ── 10. Subir PDFs a Airtable ──
+  const allAttachments = [...existingAttachments, ...pdfAttachments];
+
+  console.log(`📤 Subiendo ${pdfAttachments.length} PDFs a Airtable (registro: ${recordId})...`);
+  try {
+    await axios.patch(
+      `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
+      { fields: { Documentos: allAttachments } },
+      {
+        headers: {
+          Authorization: `Bearer ${airtableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30000,
+      }
+    );
+    console.log("🎉 [PANDADOC-DOCS] PDFs subidos exitosamente a Airtable");
+  } catch (err) {
+    console.error("❌ Error subiendo a Airtable:", err.response?.data || err.message);
+  }
+
+  // Limpiar archivos temporales después de 10 minutos
+  setTimeout(() => {
+    for (const p of tmpPaths) {
+      try {
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      } catch {}
+    }
+    console.log(`🗑️ ${tmpPaths.length} PDFs temporales eliminados`);
+  }, 10 * 60 * 1000);
+}
+
+app.post("/webhook/pandadoc-documents", async (req, res) => {
+  console.log("\n📨 [PANDADOC-DOCS] Webhook recibido");
+  console.log("📦 Body:", JSON.stringify(req.body, null, 2));
+  console.log("🔗 Query params:", JSON.stringify(req.query));
+
+  // Responder inmediatamente (PandaDoc espera respuesta rápida)
+  res.status(200).json({ status: "processing" });
+
+  // Procesar en background
+  processPandaDocDocuments(req.body, req.query).catch((err) => {
+    console.error("❌ [PANDADOC-DOCS] Error no capturado:", err.message);
+  });
+});
+
 // ─── Arranque del servidor ───────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
