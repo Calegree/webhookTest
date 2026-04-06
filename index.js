@@ -684,6 +684,10 @@ const TEST_TITULOS = {
   uta: path.join(__dirname, "assets", "U tarapaca CertificadodeTtulo.pdf"),
   ucv: path.join(__dirname, "assets", "UCV certificadoJaviera.pdf"),
   uac: path.join(__dirname, "assets", "U Aconcagua CertificadoJosSoto.pdf"),
+  inacap: path.join(__dirname, "assets", "Inacap CertificadottuloING.EVELYNAGUILERA.pdf"),
+  inacap2: path.join(__dirname, "assets", "Inacap 3.pdf"),
+  uv: path.join(__dirname, "assets", "U de valparaiso TituloEricCarrascoCarrasco.pdf"),
+  bolivariana: path.join(__dirname, "assets", "U bolivariana titulo.pdf"),
 };
 
 app.get("/test/validate-titulo/:archivo", async (req, res) => {
