@@ -953,83 +953,176 @@ async function processPandaDocDocuments(body) {
   }
   console.log(`🔢 ID del proceso extraído: ${procesoId}`);
 
-  // ── 3. Obtener attachments del documento desde PandaDoc API ──
-  console.log("📎 Obteniendo attachments de PandaDoc...");
-  let attachmentsData;
+  // ── 3. Explorar todas las APIs de PandaDoc para encontrar los archivos ──
+  console.log("🔍 Explorando documento en PandaDoc...");
+
+  // 3a. GET /details — estructura completa del documento
+  let docDetails = null;
+  try {
+    const detailsRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/details`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    docDetails = detailsRes.data;
+    console.log("📋 === DETAILS (completo) ===");
+    console.log(JSON.stringify(docDetails, null, 2));
+  } catch (err) {
+    console.error("⚠️ Error en /details:", err.response?.status, err.response?.data || err.message);
+  }
+
+  // 3b. GET /attachments
+  let attachmentsData = [];
   try {
     const attRes = await axios.get(
       `https://api.pandadoc.com/public/v1/documents/${documentId}/attachments`,
-      {
-        headers: { Authorization: `API-Key ${pandadocApiKey}` },
-        timeout: 30000,
-      }
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
     );
     attachmentsData = attRes.data;
-    console.log("📋 Respuesta de PandaDoc attachments:");
-    console.log(JSON.stringify(attachmentsData, null, 2).substring(0, 5000));
+    console.log("📋 === ATTACHMENTS ===");
+    console.log(JSON.stringify(attachmentsData, null, 2));
   } catch (err) {
-    console.error("❌ Error obteniendo attachments de PandaDoc:", err.response?.data || err.message);
-    return;
+    console.error("⚠️ Error en /attachments:", err.response?.status, err.response?.data || err.message);
   }
 
-  // Normalizar: la respuesta puede ser un array directo o tener .results
-  const rawAttachments = Array.isArray(attachmentsData)
-    ? attachmentsData
-    : (attachmentsData.results || attachmentsData.items || []);
-
-  console.log(`📎 Attachments encontrados: ${rawAttachments.length}`);
-
-  if (rawAttachments.length === 0) {
-    console.error("❌ No se encontraron attachments en el documento");
-    return;
+  // 3c. GET /fields — campos del documento
+  let fieldsData = null;
+  try {
+    const fieldsRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/fields`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    fieldsData = fieldsRes.data;
+    console.log("📋 === FIELDS ===");
+    console.log(JSON.stringify(fieldsData, null, 2));
+  } catch (err) {
+    console.error("⚠️ Error en /fields:", err.response?.status, err.response?.data || err.message);
   }
 
-  // ── 4. Descargar cada archivo adjunto ──
-  console.log("📥 Descargando archivos...");
+  // 3d. GET documento base (sin /details)
+  try {
+    const docRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    console.log("📋 === DOCUMENT BASE ===");
+    console.log(JSON.stringify(docRes.data, null, 2));
+  } catch (err) {
+    console.error("⚠️ Error en /document:", err.response?.status, err.response?.data || err.message);
+  }
+
+  console.log("🔍 === FIN EXPLORACIÓN ===");
+  console.log("💡 Revisa los logs de arriba para ver dónde PandaDoc guarda los archivos subidos");
+  console.log("💡 Una vez identificada la estructura, ajustaremos el código para extraerlos");
+
+  // ── Por ahora, intentar extraer archivos de todas las fuentes posibles ──
   const downloadedFiles = [];
 
-  for (const att of rawAttachments) {
-    const fieldName = att.field_name || att.name || att.title || "";
-    const fileName = att.file_name || att.name || "archivo";
-    const downloadUrl = att.download_url || att.url || "";
+  // Fuente 1: attachments (array directo o .results)
+  const rawAttachments = Array.isArray(attachmentsData)
+    ? attachmentsData
+    : (attachmentsData?.results || attachmentsData?.items || []);
 
-    if (!downloadUrl) {
-      console.error(`  ⚠️ Sin URL de descarga para: "${fieldName}"`);
-      continue;
+  for (const att of rawAttachments) {
+    const url = att.download_url || att.url || att.file_url || "";
+    if (url) {
+      downloadedFiles.push({
+        fieldName: att.field_name || att.name || att.title || "",
+        fileName: att.file_name || att.name || "archivo",
+        downloadUrl: url,
+      });
+    }
+  }
+
+  // Fuente 2: fields del documento (desde /details)
+  if (docDetails) {
+    const fields = docDetails.fields || [];
+    for (const field of fields) {
+      if (field.value && typeof field.value === "object" && (field.value.url || field.value.download_url)) {
+        downloadedFiles.push({
+          fieldName: field.name || field.title || field.api_id || "",
+          fileName: field.value.file_name || field.value.name || "archivo",
+          downloadUrl: field.value.url || field.value.download_url,
+        });
+      }
     }
 
+    // También buscar en content_uploads, tokens, etc.
+    for (const key of ["content_uploads", "tokens", "uploads", "files"]) {
+      const items = docDetails[key] || [];
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          const url = item.download_url || item.url || item.file_url ||
+            (item.value && (item.value.url || item.value.download_url));
+          if (url) {
+            downloadedFiles.push({
+              fieldName: item.field_name || item.name || item.title || item.token_id || "",
+              fileName: item.file_name || item.name || "archivo",
+              downloadUrl: typeof url === "string" ? url : "",
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Fuente 3: fields desde /fields endpoint
+  if (fieldsData) {
+    const fieldsList = Array.isArray(fieldsData) ? fieldsData : (fieldsData.results || fieldsData.fields || []);
+    for (const field of fieldsList) {
+      if (field.value && typeof field.value === "object" && (field.value.url || field.value.download_url)) {
+        const alreadyExists = downloadedFiles.some((f) => f.downloadUrl === (field.value.url || field.value.download_url));
+        if (!alreadyExists) {
+          downloadedFiles.push({
+            fieldName: field.name || field.title || field.api_id || "",
+            fileName: field.value.file_name || field.value.name || "archivo",
+            downloadUrl: field.value.url || field.value.download_url,
+          });
+        }
+      }
+    }
+  }
+
+  console.log(`📎 Total archivos encontrados de todas las fuentes: ${downloadedFiles.length}`);
+
+  if (downloadedFiles.length === 0) {
+    console.error("❌ No se encontraron archivos en ningún endpoint de PandaDoc");
+    console.log("💡 Revisa los logs completos de arriba para entender la estructura");
+    return;
+  }
+
+  // ── 4. Descargar cada archivo ──
+  console.log("📥 Descargando archivos...");
+  for (const file of downloadedFiles) {
     try {
-      const response = await axios.get(downloadUrl, {
+      const response = await axios.get(file.downloadUrl, {
         responseType: "arraybuffer",
         headers: { Authorization: `API-Key ${pandadocApiKey}` },
         timeout: 60000,
       });
-      const buffer = Buffer.from(response.data);
+      file.buffer = Buffer.from(response.data);
 
       // Detectar mime type por magic bytes
-      let mimeType = att.content_type || att.mime_type || "";
-      if (!mimeType) {
-        const hdr = buffer.slice(0, 4).toString("hex");
-        if (hdr.startsWith("89504e47")) mimeType = "image/png";
-        else if (hdr.startsWith("ffd8ff")) mimeType = "image/jpeg";
-        else if (hdr.startsWith("25504446")) mimeType = "application/pdf";
-      }
+      file.mimeType = "";
+      const hdr = file.buffer.slice(0, 4).toString("hex");
+      if (hdr.startsWith("89504e47")) file.mimeType = "image/png";
+      else if (hdr.startsWith("ffd8ff")) file.mimeType = "image/jpeg";
+      else if (hdr.startsWith("25504446")) file.mimeType = "application/pdf";
 
-      downloadedFiles.push({ fieldName, fileName, buffer, mimeType });
-      console.log(`  ✅ "${fieldName}": ${fileName} (${buffer.length} bytes, ${mimeType})`);
+      console.log(`  ✅ "${file.fieldName}": ${file.fileName} (${file.buffer.length} bytes, ${file.mimeType})`);
     } catch (err) {
-      console.error(`  ❌ Error descargando "${fieldName}": ${err.message}`);
+      console.error(`  ❌ Error descargando "${file.fieldName}": ${err.message}`);
     }
   }
 
-  if (downloadedFiles.length === 0) {
+  const validFiles = downloadedFiles.filter((f) => f.buffer);
+  if (validFiles.length === 0) {
     console.error("❌ No se pudo descargar ningún archivo");
     return;
   }
 
   // ── 5. Clasificar archivos por field_name ──
   console.log("📂 Clasificando archivos...");
-  const classified = classifyDocFiles(downloadedFiles);
+  const classified = classifyDocFiles(validFiles);
 
   // ── 6. Generar PDFs combinados con logo ──
   const logoBytes = fs.existsSync(LOGO_PATH) ? fs.readFileSync(LOGO_PATH) : null;
