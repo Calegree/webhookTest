@@ -824,8 +824,7 @@ app.post("/webhook/validate-license", async (req, res) => {
 // POST /webhook/pandadoc-documents — PandaDoc → PDFs combinados → Airtable
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Genera un PDF combinado a partir de múltiples archivos (imágenes o PDFs)
-// con el logo en la esquina superior derecha de cada página
+// Genera un PDF combinado con logo en esquina superior derecha
 async function generateCombinedPdfWithLogo(files, logoBytes) {
   const merged = await PDFLib.create();
 
@@ -855,12 +854,11 @@ async function generateCombinedPdfWithLogo(files, logoBytes) {
           height: ih,
         });
       } catch (imgErr) {
-        console.error(`  ⚠️ No se pudo procesar archivo ${file.fileName}: ${imgErr.message}`);
+        console.error(`  ⚠️ No se pudo procesar archivo: ${imgErr.message}`);
       }
     }
   }
 
-  // Agregar logo en esquina superior derecha de cada página
   if (logoBytes && merged.getPageCount() > 0) {
     const srcDoc = await PDFLib.load(await merged.save());
     const destDoc = await PDFLib.create();
@@ -885,39 +883,34 @@ async function generateCombinedPdfWithLogo(files, logoBytes) {
   return Buffer.from(await merged.save());
 }
 
-// Clasifica archivos según el field_name del attachment de PandaDoc
-function classifyDocFiles(attachments) {
+// Clasifica archivos según el placeholder del campo de PandaDoc
+function classifyDocFiles(files) {
   const result = {
-    ciFront: null,
-    ciBack: null,
-    titulo: null,
-    licFront: null,
-    licBack: null,
-    hvc: null,
-    otros: [],
+    ciFront: null, ciBack: null, titulo: null,
+    licFront: null, licBack: null, hvc: null, otros: [],
   };
 
-  for (const att of attachments) {
-    const name = (att.fieldName || "").toLowerCase();
-    console.log(`  📂 Clasificando: "${att.fieldName}" → ${att.fileName}`);
+  for (const file of files) {
+    const name = (file.fieldName || "").toLowerCase();
+    console.log(`  📂 Clasificando: "${file.fieldName}"`);
 
     if (/c[eé]dula.*frente|identidad.*frente/i.test(name)) {
-      result.ciFront = att;
+      result.ciFront = file;
     } else if (/c[eé]dula.*reverso|identidad.*reverso/i.test(name)) {
-      result.ciBack = att;
+      result.ciBack = file;
     } else if (/t[ií]tulo/i.test(name)) {
-      result.titulo = att;
+      result.titulo = file;
     } else if (/licencia.*frente/i.test(name)) {
-      result.licFront = att;
+      result.licFront = file;
     } else if (/licencia.*reverso/i.test(name)) {
-      result.licBack = att;
+      result.licBack = file;
     } else if (/hoja\s*de\s*vida|conductor/i.test(name)) {
-      result.hvc = att;
+      result.hvc = file;
     } else if (/otro/i.test(name) || name === "") {
-      result.otros.push(att);
+      result.otros.push(file);
     } else {
-      console.log(`    ⚠️ Campo no reconocido "${att.fieldName}", va a "otros"`);
-      result.otros.push(att);
+      console.log(`    ⚠️ Campo no reconocido, va a "otros"`);
+      result.otros.push(file);
     }
   }
 
@@ -930,11 +923,29 @@ async function processPandaDocDocuments(body) {
   const airtableBaseId = process.env.AIRTABLE_BASE_ID_DOCUMENTS;
   const airtableTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS;
 
-  // ── 1. Leer datos del body enviado por Zapier ──
-  const { documentId, documentName, recipientEmail } = body;
+  // ── 1. Normalizar el body (acepta formato Zapier simple o PandaDoc crudo) ──
+  let documentId, documentName, recipientEmail;
+
+  if (body.documentId) {
+    // Formato Zapier simple: { documentId, documentName, recipientEmail }
+    documentId = body.documentId;
+    documentName = body.documentName;
+    recipientEmail = body.recipientEmail;
+  } else {
+    // Formato PandaDoc crudo: array con [{ event, data: { id, name, ... } }]
+    const event = Array.isArray(body) ? body[0] : body;
+    const data = event.data || event;
+    documentId = data.id || event.id;
+    documentName = data.name || event.name;
+    // Buscar email del recipient
+    const recipients = data.recipients || [];
+    recipientEmail = recipients.length > 0
+      ? recipients[0].email
+      : (data.recipient?.email || "");
+  }
 
   if (!documentId) {
-    console.error("❌ [PANDADOC-DOCS] Falta documentId en el body");
+    console.error("❌ [PANDADOC-DOCS] No se encontró documentId en el body");
     return;
   }
 
@@ -948,15 +959,12 @@ async function processPandaDocDocuments(body) {
 
   if (!procesoId) {
     console.error(`❌ No se pudo extraer ID del proceso desde: "${documentName}"`);
-    console.log("💡 El nombre del documento debe contener 'ID XXXXX' (ej: 'ID 88599')");
     return;
   }
-  console.log(`🔢 ID del proceso extraído: ${procesoId}`);
+  console.log(`🔢 ID del proceso: ${procesoId}`);
 
-  // ── 3. Explorar todas las APIs de PandaDoc para encontrar los archivos ──
-  console.log("🔍 Explorando documento en PandaDoc...");
-
-  // 3a. GET /details — estructura completa del documento
+  // ── 3. Obtener detalles del documento (campos con archivos) ──
+  console.log("🔍 Obteniendo detalles del documento de PandaDoc...");
   let docDetails = null;
   try {
     const detailsRes = await axios.get(
@@ -964,100 +972,54 @@ async function processPandaDocDocuments(body) {
       { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
     );
     docDetails = detailsRes.data;
-    console.log("📋 === DETAILS (completo) ===");
-    console.log(JSON.stringify(docDetails, null, 2));
+
+    // Log solo las keys de primer nivel y cantidad de fields (no todo el objeto)
+    const topKeys = Object.keys(docDetails);
+    const fieldsCount = (docDetails.fields || []).length;
+    console.log(`📋 Details keys: [${topKeys.join(", ")}]`);
+    console.log(`📋 Fields count: ${fieldsCount}`);
   } catch (err) {
-    console.error("⚠️ Error en /details:", err.response?.status, err.response?.data || err.message);
+    console.error("❌ Error en /details:", err.response?.status, err.response?.data || err.message);
   }
 
-  // 3b. GET /attachments
-  let attachmentsData = [];
-  try {
-    const attRes = await axios.get(
-      `https://api.pandadoc.com/public/v1/documents/${documentId}/attachments`,
-      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
-    );
-    attachmentsData = attRes.data;
-    console.log("📋 === ATTACHMENTS ===");
-    console.log(JSON.stringify(attachmentsData, null, 2));
-  } catch (err) {
-    console.error("⚠️ Error en /attachments:", err.response?.status, err.response?.data || err.message);
-  }
+  // ── 4. Extraer campos de tipo "file upload" de los fields ──
+  const uploadFields = [];
 
-  // 3c. GET /fields — campos del documento
-  let fieldsData = null;
-  try {
-    const fieldsRes = await axios.get(
-      `https://api.pandadoc.com/public/v1/documents/${documentId}/fields`,
-      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
-    );
-    fieldsData = fieldsRes.data;
-    console.log("📋 === FIELDS ===");
-    console.log(JSON.stringify(fieldsData, null, 2));
-  } catch (err) {
-    console.error("⚠️ Error en /fields:", err.response?.status, err.response?.data || err.message);
-  }
+  if (docDetails && docDetails.fields) {
+    for (const field of docDetails.fields) {
+      // Los campos de upload en PandaDoc tienen placeholder con "subir un archivo"
+      // y el value contiene la URL del archivo subido o info del archivo
+      const placeholder = field.placeholder || "";
+      const fieldId = field.field_id || "";
+      const fieldName = field.name || "";
+      const fieldType = field.type || "";
+      const value = field.value;
 
-  // 3d. GET documento base (sin /details)
-  try {
-    const docRes = await axios.get(
-      `https://api.pandadoc.com/public/v1/documents/${documentId}`,
-      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
-    );
-    console.log("📋 === DOCUMENT BASE ===");
-    console.log(JSON.stringify(docRes.data, null, 2));
-  } catch (err) {
-    console.error("⚠️ Error en /document:", err.response?.status, err.response?.data || err.message);
-  }
+      // Detectar campos de upload: buscar por placeholder que menciona "subir" o "archivo"
+      // o por type "file" o "upload" o "image"
+      const isUploadByPlaceholder = /subir.*archivo|upload|adjuntar/i.test(placeholder);
+      const isUploadByType = /file|upload|image|attachment/i.test(fieldType);
+      const isUploadByFieldId = /CI|Titulo|Licencia|HVC|Otro|Cedula|archivo/i.test(fieldId);
 
-  console.log("🔍 === FIN EXPLORACIÓN ===");
-  console.log("💡 Revisa los logs de arriba para ver dónde PandaDoc guarda los archivos subidos");
-  console.log("💡 Una vez identificada la estructura, ajustaremos el código para extraerlos");
+      if (isUploadByPlaceholder || isUploadByType || isUploadByFieldId) {
+        console.log(`  📎 Campo upload encontrado: field_id="${fieldId}" placeholder="${placeholder}" type="${fieldType}" value_type="${typeof value}"`);
 
-  // ── Por ahora, intentar extraer archivos de todas las fuentes posibles ──
-  const downloadedFiles = [];
-
-  // Fuente 1: attachments (array directo o .results)
-  const rawAttachments = Array.isArray(attachmentsData)
-    ? attachmentsData
-    : (attachmentsData?.results || attachmentsData?.items || []);
-
-  for (const att of rawAttachments) {
-    const url = att.download_url || att.url || att.file_url || "";
-    if (url) {
-      downloadedFiles.push({
-        fieldName: att.field_name || att.name || att.title || "",
-        fileName: att.file_name || att.name || "archivo",
-        downloadUrl: url,
-      });
-    }
-  }
-
-  // Fuente 2: fields del documento (desde /details)
-  if (docDetails) {
-    const fields = docDetails.fields || [];
-    for (const field of fields) {
-      if (field.value && typeof field.value === "object" && (field.value.url || field.value.download_url)) {
-        downloadedFiles.push({
-          fieldName: field.name || field.title || field.api_id || "",
-          fileName: field.value.file_name || field.value.name || "archivo",
-          downloadUrl: field.value.url || field.value.download_url,
-        });
-      }
-    }
-
-    // También buscar en content_uploads, tokens, etc.
-    for (const key of ["content_uploads", "tokens", "uploads", "files"]) {
-      const items = docDetails[key] || [];
-      if (Array.isArray(items)) {
-        for (const item of items) {
-          const url = item.download_url || item.url || item.file_url ||
-            (item.value && (item.value.url || item.value.download_url));
+        if (value && typeof value === "string" && value.length > 0) {
+          // El value podría ser una URL directa o un nombre de archivo
+          if (value.startsWith("http")) {
+            uploadFields.push({ fieldName: placeholder || fieldId, url: value, fileName: fieldId });
+          } else {
+            // Podría ser un nombre de archivo (ej: "177560287578484841286194613829​0.jpg")
+            // Necesitamos construir la URL de descarga
+            console.log(`    📎 Value es nombre de archivo: "${value}"`);
+          }
+        } else if (value && typeof value === "object") {
+          const url = value.url || value.download_url || value.file_url || "";
           if (url) {
-            downloadedFiles.push({
-              fieldName: item.field_name || item.name || item.title || item.token_id || "",
-              fileName: item.file_name || item.name || "archivo",
-              downloadUrl: typeof url === "string" ? url : "",
+            uploadFields.push({
+              fieldName: placeholder || fieldId,
+              url,
+              fileName: value.file_name || value.name || fieldId,
             });
           }
         }
@@ -1065,248 +1027,240 @@ async function processPandaDocDocuments(body) {
     }
   }
 
-  // Fuente 3: fields desde /fields endpoint
-  if (fieldsData) {
-    const fieldsList = Array.isArray(fieldsData) ? fieldsData : (fieldsData.results || fieldsData.fields || []);
+  // También buscar en /fields endpoint
+  let fieldsData = null;
+  try {
+    const fieldsRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/fields`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    fieldsData = fieldsRes.data;
+
+    // Log solo campos que parecen uploads (no todo)
+    const fieldsList = Array.isArray(fieldsData) ? fieldsData : (fieldsData.fields || fieldsData.results || []);
     for (const field of fieldsList) {
-      if (field.value && typeof field.value === "object" && (field.value.url || field.value.download_url)) {
-        const alreadyExists = downloadedFiles.some((f) => f.downloadUrl === (field.value.url || field.value.download_url));
-        if (!alreadyExists) {
-          downloadedFiles.push({
-            fieldName: field.name || field.title || field.api_id || "",
-            fileName: field.value.file_name || field.value.name || "archivo",
-            downloadUrl: field.value.url || field.value.download_url,
-          });
-        }
+      const placeholder = field.placeholder || "";
+      const fieldId = field.field_id || "";
+      const fieldType = field.type || "";
+      const value = field.value;
+
+      if (/subir.*archivo|upload|adjuntar|file|image/i.test(placeholder + fieldType + fieldId)) {
+        console.log(`  📎 [/fields] field_id="${fieldId}" placeholder="${placeholder}" type="${fieldType}" value="${typeof value === "string" ? value.substring(0, 100) : JSON.stringify(value).substring(0, 200)}"`);
+      }
+    }
+  } catch (err) {
+    console.error("⚠️ Error en /fields:", err.response?.status, err.response?.data || err.message);
+  }
+
+  // También probar endpoint de content uploads
+  try {
+    const contentRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/content-library-items`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    console.log("📋 Content library items:", JSON.stringify(contentRes.data).substring(0, 500));
+  } catch (err) {
+    console.log(`⚠️ /content-library-items: ${err.response?.status || err.message}`);
+  }
+
+  // Probar descarga directa del documento completo (PDF firmado)
+  try {
+    const downloadRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/download`,
+      {
+        headers: { Authorization: `API-Key ${pandadocApiKey}` },
+        responseType: "arraybuffer",
+        timeout: 30000,
+      }
+    );
+    console.log(`📥 Documento PDF completo descargado: ${downloadRes.data.length} bytes`);
+  } catch (err) {
+    console.log(`⚠️ /download: ${err.response?.status || err.message}`);
+  }
+
+  console.log(`📎 Upload fields encontrados: ${uploadFields.length}`);
+
+  // Si encontramos campos con URLs, descargarlos
+  if (uploadFields.length > 0) {
+    console.log("📥 Descargando archivos de campos upload...");
+    for (const uf of uploadFields) {
+      try {
+        const response = await axios.get(uf.url, {
+          responseType: "arraybuffer",
+          headers: { Authorization: `API-Key ${pandadocApiKey}` },
+          timeout: 60000,
+        });
+        uf.buffer = Buffer.from(response.data);
+        console.log(`  ✅ "${uf.fieldName}": ${uf.buffer.length} bytes`);
+      } catch (err) {
+        console.error(`  ❌ Error descargando "${uf.fieldName}": ${err.message}`);
       }
     }
   }
 
-  console.log(`📎 Total archivos encontrados de todas las fuentes: ${downloadedFiles.length}`);
+  const validFiles = uploadFields.filter((f) => f.buffer);
 
-  if (downloadedFiles.length === 0) {
-    console.error("❌ No se encontraron archivos en ningún endpoint de PandaDoc");
-    console.log("💡 Revisa los logs completos de arriba para entender la estructura");
-    return;
-  }
-
-  // ── 4. Descargar cada archivo ──
-  console.log("📥 Descargando archivos...");
-  for (const file of downloadedFiles) {
-    try {
-      const response = await axios.get(file.downloadUrl, {
-        responseType: "arraybuffer",
-        headers: { Authorization: `API-Key ${pandadocApiKey}` },
-        timeout: 60000,
-      });
-      file.buffer = Buffer.from(response.data);
-
-      // Detectar mime type por magic bytes
-      file.mimeType = "";
-      const hdr = file.buffer.slice(0, 4).toString("hex");
-      if (hdr.startsWith("89504e47")) file.mimeType = "image/png";
-      else if (hdr.startsWith("ffd8ff")) file.mimeType = "image/jpeg";
-      else if (hdr.startsWith("25504446")) file.mimeType = "application/pdf";
-
-      console.log(`  ✅ "${file.fieldName}": ${file.fileName} (${file.buffer.length} bytes, ${file.mimeType})`);
-    } catch (err) {
-      console.error(`  ❌ Error descargando "${file.fieldName}": ${err.message}`);
-    }
-  }
-
-  const validFiles = downloadedFiles.filter((f) => f.buffer);
   if (validFiles.length === 0) {
-    console.error("❌ No se pudo descargar ningún archivo");
+    // Log de diagnóstico: mostrar TODOS los fields con sus types para entender la estructura
+    console.log("⚠️ No se encontraron archivos descargables");
+    console.log("📋 === DIAGNÓSTICO: Todos los fields del documento ===");
+    if (docDetails && docDetails.fields) {
+      for (const field of docDetails.fields) {
+        const p = field.placeholder || "";
+        const fid = field.field_id || "";
+        const ft = field.type || "";
+        const v = field.value;
+        const vStr = typeof v === "string" ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80);
+        console.log(`  field_id="${fid}" type="${ft}" placeholder="${p}" value=${vStr}`);
+      }
+    }
+    console.log("📋 === FIN DIAGNÓSTICO ===");
+    console.error("❌ No se pudieron obtener archivos del documento PandaDoc");
     return;
   }
 
-  // ── 5. Clasificar archivos por field_name ──
+  // ── 5. Clasificar archivos ──
   console.log("📂 Clasificando archivos...");
   const classified = classifyDocFiles(validFiles);
 
-  // ── 6. Generar PDFs combinados con logo ──
+  // ── 6. Generar PDFs con logo ──
   const logoBytes = fs.existsSync(LOGO_PATH) ? fs.readFileSync(LOGO_PATH) : null;
-  if (!logoBytes) console.warn("⚠️ Logo no encontrado en", LOGO_PATH);
+  if (!logoBytes) console.warn("⚠️ Logo no encontrado");
 
   const generatedPdfs = [];
 
-  // CI.pdf → frente + reverso cédula
   if (classified.ciFront || classified.ciBack) {
-    const ciFiles = [classified.ciFront, classified.ciBack].filter(Boolean);
-    const pdf = await generateCombinedPdfWithLogo(ciFiles, logoBytes);
+    const pdf = await generateCombinedPdfWithLogo([classified.ciFront, classified.ciBack].filter(Boolean), logoBytes);
     generatedPdfs.push({ filename: "CI.pdf", buffer: pdf });
     console.log("📄 CI.pdf generado");
   }
-
-  // Titulo.pdf
   if (classified.titulo) {
     const pdf = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
     generatedPdfs.push({ filename: "Titulo.pdf", buffer: pdf });
     console.log("📄 Titulo.pdf generado");
   }
-
-  // Licencia.pdf → frente + reverso (solo si existen)
   if (classified.licFront || classified.licBack) {
-    const licFiles = [classified.licFront, classified.licBack].filter(Boolean);
-    const pdf = await generateCombinedPdfWithLogo(licFiles, logoBytes);
+    const pdf = await generateCombinedPdfWithLogo([classified.licFront, classified.licBack].filter(Boolean), logoBytes);
     generatedPdfs.push({ filename: "Licencia.pdf", buffer: pdf });
     console.log("📄 Licencia.pdf generado");
   }
-
-  // HojaVida.pdf
   if (classified.hvc) {
     const pdf = await generateCombinedPdfWithLogo([classified.hvc], logoBytes);
     generatedPdfs.push({ filename: "HojaVida.pdf", buffer: pdf });
     console.log("📄 HojaVida.pdf generado");
   }
-
-  // Otros documentos
   for (let i = 0; i < classified.otros.length; i++) {
     const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
-    const filename = `Otro_${i + 1}.pdf`;
-    generatedPdfs.push({ filename, buffer: pdf });
-    console.log(`📄 ${filename} generado`);
+    generatedPdfs.push({ filename: `Otro_${i + 1}.pdf`, buffer: pdf });
+    console.log(`📄 Otro_${i + 1}.pdf generado`);
   }
 
   if (generatedPdfs.length === 0) {
     console.error("❌ No se generaron PDFs");
     return;
   }
-
   console.log(`✅ Total PDFs generados: ${generatedPdfs.length}`);
 
-  // ── 7. Buscar el registro en Airtable por ID + Correo ──
-  console.log(`🔍 Buscando registro en Airtable: ID=${procesoId}, Correo=${recipientEmail}`);
+  // ── 7. Buscar registro en Airtable ──
+  console.log(`🔍 Buscando en Airtable: ID=${procesoId}`);
   let recordId;
   try {
-    const formula = recipientEmail
-      ? `AND({ID} = "${procesoId}", {Correo} = "${recipientEmail}")`
-      : `{ID} = "${procesoId}"`;
-
     const searchRes = await axios.get(
       `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}`,
       {
         headers: { Authorization: `Bearer ${airtableApiKey}` },
-        params: { filterByFormula: formula, maxRecords: 1 },
+        params: { filterByFormula: `{ID} = "${procesoId}"`, maxRecords: 1 },
         timeout: 15000,
       }
     );
-
     if (searchRes.data.records.length > 0) {
       recordId = searchRes.data.records[0].id;
       console.log(`✅ Registro encontrado: ${recordId}`);
     } else {
-      console.error(`❌ No se encontró registro con ID=${procesoId} y Correo=${recipientEmail}`);
-      // Intentar solo por ID como fallback
-      if (recipientEmail) {
-        console.log("🔄 Intentando buscar solo por ID...");
-        const fallbackRes = await axios.get(
-          `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}`,
-          {
-            headers: { Authorization: `Bearer ${airtableApiKey}` },
-            params: { filterByFormula: `{ID} = "${procesoId}"`, maxRecords: 1 },
-            timeout: 15000,
-          }
-        );
-        if (fallbackRes.data.records.length > 0) {
-          recordId = fallbackRes.data.records[0].id;
-          console.log(`✅ Registro encontrado por ID (sin filtro de correo): ${recordId}`);
-        } else {
-          console.error(`❌ Tampoco se encontró registro solo por ID=${procesoId}`);
-          return;
-        }
-      } else {
-        return;
-      }
+      console.error(`❌ No se encontró registro con ID=${procesoId}`);
+      return;
     }
   } catch (err) {
     console.error("❌ Error buscando en Airtable:", err.response?.data || err.message);
     return;
   }
 
-  // ── 8. Subir cada PDF a Airtable usando Content Upload API ──
-  console.log(`📤 Subiendo ${generatedPdfs.length} PDFs a Airtable (registro: ${recordId})...`);
+  // ── 8. Subir PDFs a Airtable ──
+  console.log(`📤 Subiendo ${generatedPdfs.length} PDFs a Airtable...`);
+
+  // Guardar PDFs como temporales y usar la REST API con URLs públicas
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : (process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`);
+
+  const tmpDir = path.join(__dirname, "tmp-pdfs");
+  if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
+
+  const pdfAttachments = [];
+  const tmpPaths = [];
 
   for (const pdf of generatedPdfs) {
-    try {
-      const form = new FormData();
-      form.append("file", pdf.buffer, {
-        filename: pdf.filename,
-        contentType: "application/pdf",
-      });
-
-      const uploadUrl = `https://content.airtable.com/v0/${airtableBaseId}/${recordId}/Documentos/uploadAttachment`;
-
-      await axios.post(uploadUrl, form, {
-        headers: {
-          Authorization: `Bearer ${airtableApiKey}`,
-          ...form.getHeaders(),
-        },
-        timeout: 60000,
-      });
-
-      console.log(`  ✅ ${pdf.filename} subido a Airtable`);
-    } catch (err) {
-      console.error(`  ❌ Error subiendo ${pdf.filename}:`, err.response?.data || err.message);
-
-      // Fallback: intentar con la API REST estándar (PATCH con URL pública)
-      console.log(`  🔄 Intentando fallback con URL pública para ${pdf.filename}...`);
-      try {
-        const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
-          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-          : (process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`);
-
-        const tmpDir = path.join(__dirname, "tmp-pdfs");
-        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
-
-        const pdfId = crypto.randomUUID();
-        const pdfPath = path.join(tmpDir, `${pdfId}.pdf`);
-        fs.writeFileSync(pdfPath, pdf.buffer);
-
-        const pdfUrl = `${baseUrl}/tmp/${pdfId}.pdf`;
-        console.log(`  🌐 PDF temporal: ${pdfUrl}`);
-
-        // Obtener attachments existentes
-        const recordRes = await axios.get(
-          `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
-          { headers: { Authorization: `Bearer ${airtableApiKey}` }, timeout: 15000 }
-        );
-        const existing = (recordRes.data.fields?.Documentos || []).map((a) => ({ url: a.url }));
-
-        await axios.patch(
-          `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
-          { fields: { Documentos: [...existing, { url: pdfUrl, filename: pdf.filename }] } },
-          {
-            headers: {
-              Authorization: `Bearer ${airtableApiKey}`,
-              "Content-Type": "application/json",
-            },
-            timeout: 30000,
-          }
-        );
-        console.log(`  ✅ ${pdf.filename} subido via fallback (URL pública)`);
-
-        // Limpiar temporal después de 10 minutos
-        setTimeout(() => { try { fs.unlinkSync(pdfPath); } catch {} }, 10 * 60 * 1000);
-      } catch (fallbackErr) {
-        console.error(`  ❌ Fallback también falló para ${pdf.filename}:`, fallbackErr.response?.data || fallbackErr.message);
-      }
-    }
+    const pdfId = crypto.randomUUID();
+    const pdfPath = path.join(tmpDir, `${pdfId}.pdf`);
+    fs.writeFileSync(pdfPath, pdf.buffer);
+    tmpPaths.push(pdfPath);
+    pdfAttachments.push({ url: `${baseUrl}/tmp/${pdfId}.pdf`, filename: pdf.filename });
+    console.log(`  🌐 ${pdf.filename} → /tmp/${pdfId}.pdf`);
   }
 
-  console.log("🎉 [PANDADOC-DOCS] Proceso completado");
+  // Obtener attachments existentes para no sobreescribir
+  let existingAttachments = [];
+  try {
+    const recordRes = await axios.get(
+      `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
+      { headers: { Authorization: `Bearer ${airtableApiKey}` }, timeout: 15000 }
+    );
+    const currentDocs = recordRes.data.fields?.Documentos;
+    if (Array.isArray(currentDocs)) {
+      existingAttachments = currentDocs.map((att) => ({ url: att.url }));
+      console.log(`📎 ${existingAttachments.length} docs existentes en Airtable`);
+    }
+  } catch (err) {
+    console.warn(`⚠️ Error obteniendo docs existentes: ${err.message}`);
+  }
+
+  try {
+    await axios.patch(
+      `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
+      { fields: { Documentos: [...existingAttachments, ...pdfAttachments] } },
+      {
+        headers: {
+          Authorization: `Bearer ${airtableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30000,
+      }
+    );
+    console.log("🎉 [PANDADOC-DOCS] PDFs subidos a Airtable exitosamente");
+  } catch (err) {
+    console.error("❌ Error subiendo a Airtable:", err.response?.data || err.message);
+  }
+
+  // Limpiar temporales después de 10 minutos
+  setTimeout(() => {
+    for (const p of tmpPaths) { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch {} }
+    console.log(`🗑️ ${tmpPaths.length} temporales eliminados`);
+  }, 10 * 60 * 1000);
 }
 
 app.post("/webhook/pandadoc-documents", async (req, res) => {
   console.log("\n📨 [PANDADOC-DOCS] Webhook recibido");
-  console.log("📦 Body:", JSON.stringify(req.body, null, 2));
 
-  // Responder 200 OK inmediatamente (Zapier necesita respuesta rápida)
+  // Log compacto del body (solo keys de primer nivel, no todo el contenido)
+  const bodyForLog = Array.isArray(req.body)
+    ? `Array[${req.body.length}] event=${req.body[0]?.event} docId=${req.body[0]?.data?.id}`
+    : `Keys: [${Object.keys(req.body).join(", ")}] docId=${req.body.documentId || req.body.data?.id}`;
+  console.log(`📦 Body: ${bodyForLog}`);
+
   res.status(200).json({ status: "processing" });
 
-  // Procesar todo en background
   processPandaDocDocuments(req.body).catch((err) => {
-    console.error("❌ [PANDADOC-DOCS] Error no capturado:", err.message, err.stack);
+    console.error("❌ [PANDADOC-DOCS] Error:", err.message, err.stack);
   });
 });
 
