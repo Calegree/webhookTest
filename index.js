@@ -164,6 +164,12 @@ app.post("/insert-photo", async (req, res) => {
       console.log(`📸 URL de foto: ${image_url}`);
     } catch (err) {
       console.error("❌ Error consultando Airtable:", err.message);
+      console.error("🔍 DEBUG - URL:", `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}/${record_id}`);
+      console.error("🔍 DEBUG - BASE_ID:", AIRTABLE_BASE_ID);
+      console.error("🔍 DEBUG - TABLE_NAME:", AIRTABLE_TABLE_NAME);
+      console.error("🔍 DEBUG - API_KEY (primeros 15 chars):", AIRTABLE_API_KEY?.substring(0, 15));
+      console.error("🔍 DEBUG - Response status:", err.response?.status);
+      console.error("🔍 DEBUG - Response data:", JSON.stringify(err.response?.data));
       return res.status(502).json({
         error: "Error consultando Airtable para obtener la foto",
         details: err.message,
