@@ -196,81 +196,99 @@ app.post("/insert-photo", async (req, res) => {
   for (const [k, v] of Object.entries(raw)) {
     body[k.trim()] = v;
   }
-  let { image_url, presentation_id, record_id } = body;
+  let { presentation_id, numero_id_proceso, nombre_candidato } = body;
 
   if (!presentation_id) {
-    return res.status(400).json({
-      error: "Falta parámetro requerido: presentation_id",
-    });
+    return res.status(400).json({ error: "Falta parámetro requerido: presentation_id" });
   }
 
-  if (!image_url && !record_id) {
-    return res.status(400).json({
-      error: "Falta parámetro requerido: image_url o record_id",
-    });
+  if (!numero_id_proceso || !nombre_candidato) {
+    return res.status(400).json({ error: "Faltan parámetros requeridos: numero_id_proceso y nombre_candidato" });
   }
 
-  // ── 0. Obtener image_url desde Airtable si no viene ─────────────────────
-  if (!image_url) {
-    console.log(`🔍 Buscando foto en Airtable para registro: ${record_id}`);
-    try {
-      const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}/${record_id}`;
-      const airtableRes = await axios.get(airtableUrl, {
-        headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
-        timeout: 10000,
-      });
+  // ── 0. Buscar carnet en Documentos por ID proceso + nombre ──────────────
+  console.log(`🔍 Buscando carnet: ID=${numero_id_proceso}, Nombre=${nombre_candidato}`);
+  let imageBuffer;
+  try {
+    const docBaseId = process.env.AIRTABLE_BASE_ID_DOCUMENTS || "appowVIrRtsBBMKUg";
+    const docTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS || "tblwulQitACgXEdya";
+    const docApiKey = process.env.AIRTABLE_API_KEY_DOCUMENTS || AIRTABLE_API_KEY;
 
-      const photoField = airtableRes.data.fields[AIRTABLE_PHOTO_FIELD];
-      if (!photoField || !Array.isArray(photoField) || photoField.length === 0) {
-        return res.status(422).json({
-          error: `El registro ${record_id} no tiene foto en el campo "${AIRTABLE_PHOTO_FIELD}"`,
-        });
+    const formula = `AND({ID} = "${numero_id_proceso}", {Nombre y Apellido} = "${nombre_candidato}")`;
+    const searchRes = await axios.get(
+      `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
+      {
+        headers: { Authorization: `Bearer ${docApiKey}` },
+        params: { filterByFormula: formula, maxRecords: 1 },
+        timeout: 15000,
       }
+    );
 
-      const imageAttachment = photoField.find((att) =>
-        att.type && att.type.startsWith("image/")
-      );
+    if (searchRes.data.records.length === 0) {
+      return res.status(404).json({
+        error: `No se encontró registro con ID=${numero_id_proceso} y Nombre=${nombre_candidato}`,
+      });
+    }
 
-      if (imageAttachment) {
-        image_url = imageAttachment.url;
-      } else {
-        const att = photoField[0];
-        const thumbUrl = att.thumbnails?.full?.url || att.thumbnails?.large?.url;
+    const record = searchRes.data.records[0];
+    console.log(`✅ Registro encontrado: ${record.id}`);
+
+    const carnetField = record.fields["Frente Carnet Extraido"];
+    if (!carnetField || !Array.isArray(carnetField) || carnetField.length === 0) {
+      return res.status(422).json({
+        error: `El registro ID=${numero_id_proceso} no tiene carnet en "Frente Carnet Extraido"`,
+      });
+    }
+
+    const carnetAtt = carnetField[0];
+    console.log(`📎 Carnet: ${carnetAtt.filename} (${carnetAtt.type})`);
+
+    if (carnetAtt.type === "application/pdf") {
+      console.log("📄 Carnet es PDF, convirtiendo a imagen...");
+      const pdfResponse = await axios.get(carnetAtt.url, {
+        responseType: "arraybuffer",
+        timeout: 30000,
+      });
+      const pdfBuffer = Buffer.from(pdfResponse.data);
+
+      try {
+        imageBuffer = await sharp(pdfBuffer, { density: 300, page: 0 })
+          .jpeg({ quality: 95 })
+          .toBuffer();
+        console.log(`✅ PDF convertido a imagen: ${imageBuffer.length} bytes`);
+      } catch (sharpErr) {
+        console.error(`⚠️ Sharp no puede convertir PDF: ${sharpErr.message}`);
+        const thumbUrl = carnetAtt.thumbnails?.full?.url || carnetAtt.thumbnails?.large?.url;
         if (thumbUrl) {
-          image_url = thumbUrl;
-          console.log(`📎 Archivo es ${att.type}, usando thumbnail de Airtable`);
+          const thumbRes = await axios.get(thumbUrl, { responseType: "arraybuffer", timeout: 15000 });
+          imageBuffer = Buffer.from(thumbRes.data);
+          console.log(`📎 Usando thumbnail de Airtable: ${imageBuffer.length} bytes`);
         } else {
           return res.status(422).json({
-            error: `El archivo es ${att.type} y no tiene thumbnails. Sube JPG/PNG o PDF.`,
+            error: "No se pudo convertir el PDF del carnet a imagen",
+            details: sharpErr.message,
           });
         }
       }
-      console.log(`📸 URL de foto: ${image_url}`);
-    } catch (err) {
-      console.error("❌ Error consultando Airtable:", err.message);
-      console.error("🔍 DEBUG - URL:", `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}/${record_id}`);
-      console.error("🔍 DEBUG - BASE_ID:", AIRTABLE_BASE_ID);
-      console.error("🔍 DEBUG - TABLE_NAME:", AIRTABLE_TABLE_NAME);
-      console.error("🔍 DEBUG - API_KEY (primeros 15 chars):", AIRTABLE_API_KEY?.substring(0, 15));
-      console.error("🔍 DEBUG - Response status:", err.response?.status);
-      console.error("🔍 DEBUG - Response data:", JSON.stringify(err.response?.data));
-      return res.status(502).json({
-        error: "Error consultando Airtable para obtener la foto",
-        details: err.message,
-      });
+    } else {
+      const imgRes = await axios.get(carnetAtt.url, { responseType: "arraybuffer", timeout: 15000 });
+      imageBuffer = Buffer.from(imgRes.data);
+      console.log(`✅ Imagen descargada: ${imageBuffer.length} bytes`);
     }
+  } catch (err) {
+    if (err.response?.status) {
+      console.error("❌ Error buscando carnet:", err.response?.status, err.response?.data);
+    } else {
+      console.error("❌ Error buscando carnet:", err.message);
+    }
+    return res.status(502).json({
+      error: "Error buscando carnet en base de Documentos",
+      details: err.message,
+    });
   }
 
   try {
     console.log(`📥 Presentación: ${presentation_id}`);
-
-    // ── 1. Descargar imagen ────────────────────────────────────────────────
-    const imageResponse = await axios.get(image_url, {
-      responseType: "arraybuffer",
-      timeout: 15000,
-    });
-    const imageBuffer = Buffer.from(imageResponse.data);
-    console.log(`✅ Imagen descargada (${imageBuffer.length} bytes)`);
 
     // ── 2. Recortar rostro del carnet ──────────────────────────────────────
     const processedImage = await cropFaceFromCarnet(imageBuffer);
