@@ -963,7 +963,7 @@ async function processPandaDocDocuments(body) {
   }
   console.log(`🔢 ID del proceso: ${procesoId}`);
 
-  // ── 3. Obtener detalles del documento (campos con archivos) ──
+  // ── 3. Obtener detalles del documento para encontrar Collect files ──
   console.log("🔍 Obteniendo detalles del documento de PandaDoc...");
   let docDetails = null;
   try {
@@ -972,117 +972,132 @@ async function processPandaDocDocuments(body) {
       { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
     );
     docDetails = detailsRes.data;
-
-    // Log solo las keys de primer nivel y cantidad de fields (no todo el objeto)
     const topKeys = Object.keys(docDetails);
-    const fieldsCount = (docDetails.fields || []).length;
     console.log(`📋 Details keys: [${topKeys.join(", ")}]`);
-    console.log(`📋 Fields count: ${fieldsCount}`);
+
+    // Log compacto de cada propiedad que sea un array (para encontrar dónde están los Collect files)
+    for (const key of topKeys) {
+      const val = docDetails[key];
+      if (Array.isArray(val) && val.length > 0) {
+        console.log(`📋 "${key}": ${val.length} items`);
+        // Mostrar primer item como muestra de la estructura
+        const sample = val[0];
+        const sampleKeys = Object.keys(sample);
+        console.log(`   Sample keys: [${sampleKeys.join(", ")}]`);
+        // Para fields, images, tokens: mostrar TODOS los items de forma compacta
+        if (["fields", "images", "tokens"].includes(key)) {
+          for (let i = 0; i < val.length; i++) {
+            const item = val[i];
+            const itemStr = JSON.stringify(item).substring(0, 300);
+            console.log(`   [${i}] ${itemStr}`);
+          }
+        }
+      }
+    }
   } catch (err) {
     console.error("❌ Error en /details:", err.response?.status, err.response?.data || err.message);
   }
 
-  // ── 4. Extraer campos de tipo "file upload" de los fields ──
+  // ── 4. Extraer archivos de Collect files ──
   const uploadFields = [];
 
-  if (docDetails && docDetails.fields) {
-    for (const field of docDetails.fields) {
-      // Los campos de upload en PandaDoc tienen placeholder con "subir un archivo"
-      // y el value contiene la URL del archivo subido o info del archivo
-      const placeholder = field.placeholder || "";
-      const fieldId = field.field_id || "";
-      const fieldName = field.name || "";
-      const fieldType = field.type || "";
-      const value = field.value;
+  if (docDetails) {
+    // Buscar en TODAS las propiedades del documento que sean arrays
+    for (const key of Object.keys(docDetails)) {
+      const arr = docDetails[key];
+      if (!Array.isArray(arr)) continue;
 
-      // Detectar campos de upload: buscar por placeholder que menciona "subir" o "archivo"
-      // o por type "file" o "upload" o "image"
-      const isUploadByPlaceholder = /subir.*archivo|upload|adjuntar/i.test(placeholder);
-      const isUploadByType = /file|upload|image|attachment/i.test(fieldType);
-      const isUploadByFieldId = /CI|Titulo|Licencia|HVC|Otro|Cedula|archivo/i.test(fieldId);
+      for (const item of arr) {
+        if (!item || typeof item !== "object") continue;
 
-      if (isUploadByPlaceholder || isUploadByType || isUploadByFieldId) {
-        console.log(`  📎 Campo upload encontrado: field_id="${fieldId}" placeholder="${placeholder}" type="${fieldType}" value_type="${typeof value}"`);
+        // Buscar cualquier campo que tenga URL de archivo o sea tipo file/collect/upload/image
+        const type = (item.type || "").toLowerCase();
+        const placeholder = (item.placeholder || "").toLowerCase();
+        const name = (item.name || "").toLowerCase();
+        const fieldId = (item.field_id || "").toLowerCase();
 
-        if (value && typeof value === "string" && value.length > 0) {
-          // El value podría ser una URL directa o un nombre de archivo
-          if (value.startsWith("http")) {
-            uploadFields.push({ fieldName: placeholder || fieldId, url: value, fileName: fieldId });
-          } else {
-            // Podría ser un nombre de archivo (ej: "177560287578484841286194613829​0.jpg")
-            // Necesitamos construir la URL de descarga
-            console.log(`    📎 Value es nombre de archivo: "${value}"`);
+        // Detectar campos Collect files por tipo, placeholder, o estructura
+        const isFileType = /file|collect|upload|attachment|image/i.test(type);
+        const isFileByPlaceholder = /subir|archivo|upload|adjuntar|haz clic/i.test(placeholder);
+        const hasFileData = item.value && typeof item.value === "object" && (item.value.url || item.value.download_url || item.value.file_url);
+        const hasDirectUrl = item.url || item.download_url || item.file_url || item.src;
+
+        if (isFileType || isFileByPlaceholder || hasFileData || hasDirectUrl) {
+          console.log(`  📎 Posible archivo en "${key}": ${JSON.stringify(item).substring(0, 400)}`);
+
+          let url = "";
+          let fileName = "";
+          let fieldName = item.placeholder || item.name || item.field_id || item.title || key;
+
+          // Extraer URL del archivo
+          if (hasFileData) {
+            url = item.value.url || item.value.download_url || item.value.file_url;
+            fileName = item.value.file_name || item.value.name || "";
+          } else if (hasDirectUrl) {
+            url = item.url || item.download_url || item.file_url || item.src;
+            fileName = item.file_name || item.name || "";
           }
-        } else if (value && typeof value === "object") {
-          const url = value.url || value.download_url || value.file_url || "";
+
+          // Si el value es un string que parece nombre de archivo
+          if (!url && typeof item.value === "string" && /\.(jpg|jpeg|png|pdf|doc|docx)$/i.test(item.value)) {
+            fileName = item.value;
+            console.log(`    📎 Value es nombre de archivo: "${fileName}" - necesitamos encontrar la URL`);
+          }
+
           if (url) {
-            uploadFields.push({
-              fieldName: placeholder || fieldId,
-              url,
-              fileName: value.file_name || value.name || fieldId,
-            });
+            uploadFields.push({ fieldName, url, fileName: fileName || fieldName });
           }
         }
       }
     }
   }
 
-  // También buscar en /fields endpoint
-  let fieldsData = null;
+  // También buscar con el endpoint /fields
   try {
     const fieldsRes = await axios.get(
       `https://api.pandadoc.com/public/v1/documents/${documentId}/fields`,
       { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
     );
-    fieldsData = fieldsRes.data;
-
-    // Log solo campos que parecen uploads (no todo)
+    const fieldsData = fieldsRes.data;
     const fieldsList = Array.isArray(fieldsData) ? fieldsData : (fieldsData.fields || fieldsData.results || []);
+    console.log(`📋 /fields endpoint: ${fieldsList.length} campos`);
     for (const field of fieldsList) {
-      const placeholder = field.placeholder || "";
-      const fieldId = field.field_id || "";
-      const fieldType = field.type || "";
-      const value = field.value;
-
-      if (/subir.*archivo|upload|adjuntar|file|image/i.test(placeholder + fieldType + fieldId)) {
-        console.log(`  📎 [/fields] field_id="${fieldId}" placeholder="${placeholder}" type="${fieldType}" value="${typeof value === "string" ? value.substring(0, 100) : JSON.stringify(value).substring(0, 200)}"`);
+      const type = (field.type || "").toLowerCase();
+      if (/file|collect|upload|attachment|image/i.test(type)) {
+        console.log(`  📎 [/fields] tipo archivo: ${JSON.stringify(field).substring(0, 400)}`);
       }
     }
   } catch (err) {
-    console.error("⚠️ Error en /fields:", err.response?.status, err.response?.data || err.message);
+    console.error("⚠️ Error en /fields:", err.response?.status);
   }
 
-  // También probar endpoint de content uploads
+  // Probar endpoint de linked objects (podrían ser los archivos)
   try {
-    const contentRes = await axios.get(
-      `https://api.pandadoc.com/public/v1/documents/${documentId}/content-library-items`,
+    const linkedRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/linked-objects`,
       { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
     );
-    console.log("📋 Content library items:", JSON.stringify(contentRes.data).substring(0, 500));
+    console.log("📋 Linked objects:", JSON.stringify(linkedRes.data).substring(0, 500));
   } catch (err) {
-    console.log(`⚠️ /content-library-items: ${err.response?.status || err.message}`);
+    console.log(`⚠️ /linked-objects: ${err.response?.status || err.message}`);
   }
 
-  // Probar descarga directa del documento completo (PDF firmado)
+  // Probar endpoint de sections/content
   try {
-    const downloadRes = await axios.get(
-      `https://api.pandadoc.com/public/v1/documents/${documentId}/download`,
-      {
-        headers: { Authorization: `API-Key ${pandadocApiKey}` },
-        responseType: "arraybuffer",
-        timeout: 30000,
-      }
+    const sectionsRes = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/sections`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
     );
-    console.log(`📥 Documento PDF completo descargado: ${downloadRes.data.length} bytes`);
+    console.log("📋 Sections:", JSON.stringify(sectionsRes.data).substring(0, 500));
   } catch (err) {
-    console.log(`⚠️ /download: ${err.response?.status || err.message}`);
+    console.log(`⚠️ /sections: ${err.response?.status || err.message}`);
   }
 
   console.log(`📎 Upload fields encontrados: ${uploadFields.length}`);
 
   // Si encontramos campos con URLs, descargarlos
   if (uploadFields.length > 0) {
-    console.log("📥 Descargando archivos de campos upload...");
+    console.log("📥 Descargando archivos...");
     for (const uf of uploadFields) {
       try {
         const response = await axios.get(uf.url, {
@@ -1091,9 +1106,9 @@ async function processPandaDocDocuments(body) {
           timeout: 60000,
         });
         uf.buffer = Buffer.from(response.data);
-        console.log(`  ✅ "${uf.fieldName}": ${uf.buffer.length} bytes`);
+        console.log(`  ✅ "${uf.fieldName}": ${uf.fileName} (${uf.buffer.length} bytes)`);
       } catch (err) {
-        console.error(`  ❌ Error descargando "${uf.fieldName}": ${err.message}`);
+        console.error(`  ❌ Error descargando "${uf.fieldName}": ${err.response?.status} ${err.message}`);
       }
     }
   }
@@ -1101,21 +1116,8 @@ async function processPandaDocDocuments(body) {
   const validFiles = uploadFields.filter((f) => f.buffer);
 
   if (validFiles.length === 0) {
-    // Log de diagnóstico: mostrar TODOS los fields con sus types para entender la estructura
-    console.log("⚠️ No se encontraron archivos descargables");
-    console.log("📋 === DIAGNÓSTICO: Todos los fields del documento ===");
-    if (docDetails && docDetails.fields) {
-      for (const field of docDetails.fields) {
-        const p = field.placeholder || "";
-        const fid = field.field_id || "";
-        const ft = field.type || "";
-        const v = field.value;
-        const vStr = typeof v === "string" ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80);
-        console.log(`  field_id="${fid}" type="${ft}" placeholder="${p}" value=${vStr}`);
-      }
-    }
-    console.log("📋 === FIN DIAGNÓSTICO ===");
-    console.error("❌ No se pudieron obtener archivos del documento PandaDoc");
+    console.error("❌ No se encontraron archivos Collect files descargables");
+    console.log("💡 Revisa los logs de arriba - busca items en 'images', 'fields' o 'tokens' que contengan URLs de archivos");
     return;
   }
 
