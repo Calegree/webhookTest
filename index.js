@@ -49,32 +49,54 @@ const FACE_PX = 500; // resolución interna alta para buena calidad
 // ─── Almacén temporal de imágenes en memoria ─────────────────────────────────
 const tempImages = new Map();
 
-// ─── Recorte de rostro desde carnet chileno ──────────────────────────────────
+// ─── Recorte de rostro desde PDF de carnet (layout: logo + frente + reverso) ─
+// El PDF convertido a imagen tiene esta estructura:
+//   ~0-12%  → Logo Transearch
+//   ~12-55% → Carnet frente (la foto está en el lado izquierdo del carnet)
+//   ~55-95% → Carnet reverso
+// Dentro del carnet frente, la foto ocupa aprox el 30% izquierdo
 async function cropFaceFromCarnet(imageBuffer) {
   const meta = await sharp(imageBuffer, { failOn: "none" }).metadata();
   const w = meta.width;
   const h = meta.height;
 
-  // Zona ajustada para capturar la cara completa (frente a barbilla)
-  // Carnet chileno: foto en la zona izquierda
-  const cropLeft = Math.round(w * 0.04);
-  const cropTop = Math.round(h * 0.15);
-  const cropWidth = Math.round(w * 0.26);
-  const cropHeight = Math.round(h * 0.72);
+  // Primero extraer solo el carnet frente (mitad superior, sin logo)
+  const carnetTop = Math.round(h * 0.13);
+  const carnetHeight = Math.round(h * 0.40);
 
-  console.log(`📐 Imagen original: ${w}×${h}px, recortando cara: ${cropWidth}×${cropHeight}px desde (${cropLeft},${cropTop})`);
+  console.log(`📐 Imagen original: ${w}×${h}px`);
+  console.log(`📐 Extrayendo carnet frente: y=${carnetTop}, h=${carnetHeight}`);
 
-  const faceRegion = await sharp(imageBuffer, { failOn: "none" })
+  const carnetFront = await sharp(imageBuffer, { failOn: "none" })
     .extract({
-      left: cropLeft,
-      top: cropTop,
-      width: Math.min(cropWidth, w - cropLeft),
-      height: Math.min(cropHeight, h - cropTop),
+      left: 0,
+      top: carnetTop,
+      width: w,
+      height: Math.min(carnetHeight, h - carnetTop),
     })
     .toBuffer();
 
-  // Usar aspect ratio de retrato (3:4) para no cortar barbilla ni frente
-  // Esto hace que la imagen sea más alta que ancha, capturando cara completa
+  // Ahora del carnet frente, extraer la zona de la foto (lado izquierdo)
+  const carnetMeta = await sharp(carnetFront, { failOn: "none" }).metadata();
+  const cw = carnetMeta.width;
+  const ch = carnetMeta.height;
+
+  const faceLeft = Math.round(cw * 0.05);
+  const faceTop = Math.round(ch * 0.10);
+  const faceWidth = Math.round(cw * 0.25);
+  const faceHeight = Math.round(ch * 0.75);
+
+  console.log(`📐 Carnet frente: ${cw}×${ch}px, recortando cara: ${faceWidth}×${faceHeight}px desde (${faceLeft},${faceTop})`);
+
+  const faceRegion = await sharp(carnetFront, { failOn: "none" })
+    .extract({
+      left: faceLeft,
+      top: faceTop,
+      width: Math.min(faceWidth, cw - faceLeft),
+      height: Math.min(faceHeight, ch - faceTop),
+    })
+    .toBuffer();
+
   const outW = FACE_PX;
   const outH = Math.round(FACE_PX * 1.33); // ratio 3:4 (retrato)
 
@@ -85,7 +107,7 @@ async function cropFaceFromCarnet(imageBuffer) {
     .jpeg({ quality: 95 })
     .toBuffer();
 
-  console.log(`✂️  Rostro recortado a ${outW}×${outH}px (retrato 3:4)`);
+  console.log(`✂️  Rostro recortado a ${outW}×${outH}px (retrato 3:4, escala de grises)`);
   return processedImage;
 }
 
