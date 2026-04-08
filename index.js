@@ -81,10 +81,10 @@ async function cropFaceFromCarnet(imageBuffer) {
   const cw = carnetMeta.width;
   const ch = carnetMeta.height;
 
-  const faceLeft = Math.round(cw * 0.05);
-  const faceTop = Math.round(ch * 0.10);
-  const faceWidth = Math.round(cw * 0.25);
-  const faceHeight = Math.round(ch * 0.75);
+  const faceLeft = Math.round(cw * 0.07);
+  const faceTop = Math.round(ch * 0.05);
+  const faceWidth = Math.round(cw * 0.22);
+  const faceHeight = Math.round(ch * 0.70);
 
   console.log(`📐 Carnet frente: ${cw}×${ch}px, recortando cara: ${faceWidth}×${faceHeight}px desde (${faceLeft},${faceTop})`);
 
