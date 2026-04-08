@@ -80,6 +80,8 @@ async function cropFaceFromCarnet(imageBuffer) {
 
   const processedImage = await sharp(faceRegion)
     .resize(outW, outH, { fit: "cover", position: "centre" })
+    .grayscale()
+    .linear(0.85, 30)
     .jpeg({ quality: 95 })
     .toBuffer();
 
