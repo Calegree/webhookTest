@@ -883,7 +883,9 @@ async function generateCombinedPdfWithLogo(files, logoBytes) {
   return Buffer.from(await merged.save());
 }
 
-// Clasifica archivos según el placeholder del campo de PandaDoc
+// Clasifica archivos según el nombre del campo de PandaDoc
+// Los campos Collect files vienen como "Haz clic para subir un archivo (CI)", "(LC)", "(Título)", "(HVC)"
+// Para CI y LC que aparecen 2 veces: el primero es frente, el segundo es reverso
 function classifyDocFiles(files) {
   const result = {
     ciFront: null, ciBack: null, titulo: null,
@@ -894,20 +896,33 @@ function classifyDocFiles(files) {
     const name = (file.fieldName || "").toLowerCase();
     console.log(`  📂 Clasificando: "${file.fieldName}"`);
 
-    if (/c[eé]dula.*frente|identidad.*frente/i.test(name)) {
-      result.ciFront = file;
-    } else if (/c[eé]dula.*reverso|identidad.*reverso/i.test(name)) {
-      result.ciBack = file;
-    } else if (/t[ií]tulo/i.test(name)) {
+    // Patrones para campos PandaDoc: "(CI)", "(LC)", "(Título)", "(HVC)"
+    // y también formatos descriptivos: "cédula frente", "licencia reverso", etc.
+    if (/\(ci\)|c[eé]dula|identidad|carnet/i.test(name)) {
+      if (!result.ciFront) {
+        result.ciFront = file;
+        console.log(`    → CI Frente`);
+      } else {
+        result.ciBack = file;
+        console.log(`    → CI Reverso`);
+      }
+    } else if (/\(t[ií]tulo\)|t[ií]tulo/i.test(name)) {
       result.titulo = file;
-    } else if (/licencia.*frente/i.test(name)) {
-      result.licFront = file;
-    } else if (/licencia.*reverso/i.test(name)) {
-      result.licBack = file;
-    } else if (/hoja\s*de\s*vida|conductor/i.test(name)) {
+      console.log(`    → Título`);
+    } else if (/\(lc\)|licencia/i.test(name)) {
+      if (!result.licFront) {
+        result.licFront = file;
+        console.log(`    → Licencia Frente`);
+      } else {
+        result.licBack = file;
+        console.log(`    → Licencia Reverso`);
+      }
+    } else if (/\(hvc\)|hoja\s*de\s*vida|conductor/i.test(name)) {
       result.hvc = file;
+      console.log(`    → Hoja de Vida Conductor`);
     } else if (/otro/i.test(name) || name === "") {
       result.otros.push(file);
+      console.log(`    → Otro`);
     } else {
       console.log(`    ⚠️ Campo no reconocido, va a "otros"`);
       result.otros.push(file);
