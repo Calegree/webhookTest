@@ -92,6 +92,88 @@ app.get("/", (req, res) => {
   res.send("Webhook Transearch — Insercion de fotos en Google Slides activo");
 });
 
+// ─── Test de permisos Airtable ──────────────────────────────────────────────
+app.get("/test/airtable", async (req, res) => {
+  const baseId = req.query.base || AIRTABLE_BASE_ID;
+  const table = req.query.table || AIRTABLE_TABLE_NAME;
+  const recordId = req.query.record;
+  const apiKey = req.query.token || AIRTABLE_API_KEY;
+
+  const results = {};
+
+  // Test 1: Listar tablas de la base (requiere schema.bases:read)
+  console.log("\n🧪 === TEST AIRTABLE PERMISOS ===");
+  console.log(`🔑 Token (primeros 20): ${apiKey?.substring(0, 20)}...`);
+  console.log(`📦 Base ID: ${baseId}`);
+  console.log(`📋 Table: ${table}`);
+  console.log(`📌 Record: ${recordId || "(ninguno)"}`);
+
+  // Test 1: Listar bases accesibles
+  try {
+    const basesRes = await axios.get("https://api.airtable.com/v0/meta/bases", {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      timeout: 10000,
+    });
+    const bases = basesRes.data.bases || [];
+    results.test1_bases = {
+      status: "OK",
+      count: bases.length,
+      bases: bases.map((b) => ({ id: b.id, name: b.name })),
+    };
+    console.log(`✅ Test 1 - Bases accesibles: ${bases.length}`);
+    for (const b of bases) console.log(`   ${b.id} → ${b.name}`);
+  } catch (err) {
+    results.test1_bases = { status: "ERROR", code: err.response?.status, error: err.response?.data || err.message };
+    console.error(`❌ Test 1 - Error listando bases: ${err.response?.status} ${JSON.stringify(err.response?.data)}`);
+  }
+
+  // Test 2: Listar registros de la tabla (solo 1)
+  try {
+    const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(table)}?maxRecords=1`;
+    const listRes = await axios.get(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      timeout: 10000,
+    });
+    const records = listRes.data.records || [];
+    results.test2_list = {
+      status: "OK",
+      count: records.length,
+      firstRecordId: records[0]?.id,
+      firstRecordFields: Object.keys(records[0]?.fields || {}),
+    };
+    console.log(`✅ Test 2 - Listar tabla "${table}": ${records.length} registro(s)`);
+    if (records[0]) console.log(`   Primer registro: ${records[0].id}`);
+  } catch (err) {
+    results.test2_list = { status: "ERROR", code: err.response?.status, error: err.response?.data || err.message };
+    console.error(`❌ Test 2 - Error listando tabla: ${err.response?.status} ${JSON.stringify(err.response?.data)}`);
+  }
+
+  // Test 3: Leer registro específico (si se proporcionó)
+  if (recordId) {
+    try {
+      const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(table)}/${recordId}`;
+      const recRes = await axios.get(url, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeout: 10000,
+      });
+      results.test3_record = {
+        status: "OK",
+        id: recRes.data.id,
+        fields: Object.keys(recRes.data.fields || {}),
+        hasFoto: !!recRes.data.fields?.Foto,
+      };
+      console.log(`✅ Test 3 - Registro ${recordId}: OK`);
+      console.log(`   Campos: ${Object.keys(recRes.data.fields || {}).join(", ")}`);
+    } catch (err) {
+      results.test3_record = { status: "ERROR", code: err.response?.status, error: err.response?.data || err.message };
+      console.error(`❌ Test 3 - Error leyendo registro: ${err.response?.status} ${JSON.stringify(err.response?.data)}`);
+    }
+  }
+
+  console.log("🧪 === FIN TEST ===\n");
+  res.json(results);
+});
+
 // ─── Servir imágenes temporales ──────────────────────────────────────────────
 app.get("/tmp/:id.jpg", (req, res) => {
   const imageBuffer = tempImages.get(req.params.id);
