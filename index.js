@@ -7,7 +7,7 @@ const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
 const PDFDocument = require("pdfkit");
-const { PDFDocument: PDFLib } = require("pdf-lib");
+const { PDFDocument: PDFLib, PDFName, PDFRef } = require("pdf-lib");
 const FormData = require("form-data");
 
 const app = express();
@@ -1089,14 +1089,15 @@ async function processPandaDocDocuments(body) {
   const airtableTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS;
 
   // ── 1. Normalizar el body (acepta formato Zapier simple o PandaDoc crudo) ──
-  let documentId, documentName, recipientEmail, recipientName;
+  let documentId, documentName, recipientEmail, recipientName, pdfUrl;
 
   if (body.documentId) {
-    // Formato Zapier simple: { documentId, documentName, recipientEmail, recipientFirstName }
+    // Formato Zapier simple: { documentId, documentName, recipientEmail, recipientFirstName, pdfUrl }
     documentId = body.documentId;
     documentName = body.documentName;
     recipientEmail = body.recipientEmail;
     recipientName = body.recipientFirstName || "";
+    pdfUrl = body.pdfUrl || "";
   } else {
     // Formato PandaDoc crudo: array con [{ event, data: { id, name, ... } }]
     const event = Array.isArray(body) ? body[0] : body;
@@ -1325,6 +1326,63 @@ async function processPandaDocDocuments(body) {
     const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
     generatedPdfs.push({ filename: `Otro_${i + 1}.pdf`, buffer: pdf });
     console.log(`📄 Otro_${i + 1}.pdf generado`);
+  }
+
+  // ── 6b. Descargar PDF original (declaraciones firmadas) sin logo ──
+  if (pdfUrl) {
+    console.log("📥 Descargando PDF original de declaraciones...");
+    try {
+      const pdfRes = await axios.get(pdfUrl, { responseType: "arraybuffer", timeout: 60000 });
+      const srcPdf = await PDFLib.load(pdfRes.data, { ignoreEncryption: true });
+      const pageCount = srcPdf.getPageCount();
+      console.log(`📄 PDF original: ${pageCount} páginas`);
+
+      // La página de "ADJUNTAR DOCUMENTOS" (collect files) y las siguientes
+      // son el formulario de subida + los archivos adjuntos renderizados.
+      // Detectamos esa página buscando un cambio brusco de tamaño de página
+      // (las declaraciones son tamaño carta/letter, la de collect files puede diferir)
+      // o usamos heurística: el formulario de collect files suele estar en las últimas ~4 páginas.
+      // Copiamos solo las páginas previas al formulario.
+      let collectPageIndex = pageCount; // por defecto, mantener todas
+      for (let i = 0; i < pageCount; i++) {
+        const page = srcPdf.getPage(i);
+        // Buscar en los operadores de texto del content stream
+        try {
+          const contents = page.node.get(PDFName.of("Contents"));
+          if (contents) {
+            const ref = contents instanceof PDFRef ? page.node.context.lookup(contents) : contents;
+            let raw = "";
+            if (ref && typeof ref.decodeStream === "function") {
+              raw = Buffer.from(ref.decodeStream()).toString("latin1");
+            } else if (ref && typeof ref.getContentsString === "function") {
+              raw = ref.getContentsString();
+            }
+            if (raw.includes("ADJUNTAR") || raw.includes("DOCUMENTO SOLICITADO")) {
+              collectPageIndex = i;
+              console.log(`🔍 Página de collect files detectada: ${i + 1}`);
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      // Fallback: si no se detectó, quitar las últimas 4 páginas (collect + adjuntos)
+      if (collectPageIndex === pageCount && pageCount > 4) {
+        collectPageIndex = pageCount - 4;
+        console.log(`⚠️ Fallback: eliminando desde página ${collectPageIndex + 1}`);
+      }
+
+      // Crear nuevo PDF solo con las páginas de declaraciones
+      const cleanPdf = await PDFLib.create();
+      const pagesToKeep = await cleanPdf.copyPages(srcPdf, Array.from({ length: collectPageIndex }, (_, i) => i));
+      for (const p of pagesToKeep) cleanPdf.addPage(p);
+
+      const cleanedPdfBytes = await cleanPdf.save();
+      generatedPdfs.push({ filename: "Declaraciones.pdf", buffer: Buffer.from(cleanedPdfBytes) });
+      console.log(`📄 Declaraciones.pdf generado (${cleanPdf.getPageCount()} de ${pageCount} páginas, sin logo)`);
+    } catch (err) {
+      console.error("⚠️ Error descargando PDF original:", err.message);
+    }
   }
 
   if (generatedPdfs.length === 0) {
