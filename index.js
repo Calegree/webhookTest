@@ -1069,24 +1069,28 @@ async function processPandaDocDocuments(body) {
   const airtableTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS;
 
   // ── 1. Normalizar el body (acepta formato Zapier simple o PandaDoc crudo) ──
-  let documentId, documentName, recipientEmail;
+  let documentId, documentName, recipientEmail, recipientName;
 
   if (body.documentId) {
-    // Formato Zapier simple: { documentId, documentName, recipientEmail }
+    // Formato Zapier simple: { documentId, documentName, recipientEmail, recipientFirstName }
     documentId = body.documentId;
     documentName = body.documentName;
     recipientEmail = body.recipientEmail;
+    recipientName = body.recipientFirstName || "";
   } else {
     // Formato PandaDoc crudo: array con [{ event, data: { id, name, ... } }]
     const event = Array.isArray(body) ? body[0] : body;
     const data = event.data || event;
     documentId = data.id || event.id;
     documentName = data.name || event.name;
-    // Buscar email del recipient
+    // Buscar email y nombre del recipient
     const recipients = data.recipients || [];
     recipientEmail = recipients.length > 0
       ? recipients[0].email
       : (data.recipient?.email || "");
+    recipientName = recipients.length > 0
+      ? [recipients[0].first_name, recipients[0].last_name].filter(Boolean).join(" ")
+      : "";
   }
 
   if (!documentId) {
@@ -1096,6 +1100,7 @@ async function processPandaDocDocuments(body) {
 
   console.log(`📄 Document ID: ${documentId}`);
   console.log(`📝 Document Name: ${documentName}`);
+  console.log(`👤 Recipient Name: ${recipientName || "(no disponible)"}`);
   console.log(`📧 Recipient Email: ${recipientEmail}`);
 
   // ── 2. Extraer ID numérico del proceso desde documentName ──
@@ -1308,23 +1313,30 @@ async function processPandaDocDocuments(body) {
   }
   console.log(`✅ Total PDFs generados: ${generatedPdfs.length}`);
 
-  // ── 7. Buscar registro en Airtable ──
-  console.log(`🔍 Buscando en Airtable: ID=${procesoId}`);
+  // ── 7. Buscar registro en Airtable (por ID + Correo del recipient) ──
+  console.log(`🔍 Buscando en Airtable: ID=${procesoId}, Email=${recipientEmail || "(sin email)"}`);
   let recordId;
   try {
+    // Si tenemos email del recipient, buscar con ID + Correo para evitar duplicados
+    const formula = recipientEmail
+      ? `AND({ID} = "${procesoId}", {Correo} = "${recipientEmail}")`
+      : `{ID} = "${procesoId}"`;
+    console.log(`📐 Fórmula: ${formula}`);
+
     const searchRes = await axios.get(
       `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}`,
       {
         headers: { Authorization: `Bearer ${airtableApiKey}` },
-        params: { filterByFormula: `{ID} = "${procesoId}"`, maxRecords: 1 },
+        params: { filterByFormula: formula, maxRecords: 1 },
         timeout: 15000,
       }
     );
     if (searchRes.data.records.length > 0) {
       recordId = searchRes.data.records[0].id;
-      console.log(`✅ Registro encontrado: ${recordId}`);
+      const foundName = searchRes.data.records[0].fields?.["Nombre y Apellido"] || "";
+      console.log(`✅ Registro encontrado: ${recordId} (${foundName})`);
     } else {
-      console.error(`❌ No se encontró registro con ID=${procesoId}`);
+      console.error(`❌ No se encontró registro con ID=${procesoId}${recipientEmail ? ` y Correo="${recipientEmail}"` : ""}`);
       return;
     }
   } catch (err) {
