@@ -1411,6 +1411,98 @@ app.post("/webhook/pandadoc-documents", async (req, res) => {
   });
 });
 
+// ─── Test: explorar qué devuelve PandaDoc /details para Collect files ───────
+app.get("/test/pandadoc-details/:documentId", async (req, res) => {
+  const documentId = req.params.documentId;
+  const pandadocApiKey = process.env.PANDADOC_API_KEY_DOCUMENTS;
+
+  const results = { documentId, endpoints: {} };
+
+  // 1. /details
+  try {
+    const r = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/details`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    const data = r.data;
+    results.endpoints.details = {
+      keys: Object.keys(data),
+      fields_count: (data.fields || []).length,
+      fields: (data.fields || []).map((f) => ({
+        field_id: f.field_id,
+        type: f.type,
+        name: f.name,
+        placeholder: f.placeholder,
+        value: f.value,
+        merge_field: f.merge_field,
+      })),
+      images_count: (data.images || []).length,
+      images: (data.images || []).slice(0, 10),
+      tokens_count: (data.tokens || []).length,
+      tokens: (data.tokens || []).slice(0, 10),
+    };
+  } catch (err) {
+    results.endpoints.details = { error: err.response?.status, data: err.response?.data || err.message };
+  }
+
+  // 2. /fields
+  try {
+    const r = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/fields`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    results.endpoints.fields = r.data;
+  } catch (err) {
+    results.endpoints.fields = { error: err.response?.status, data: err.response?.data || err.message };
+  }
+
+  // 3. /content
+  try {
+    const r = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/content`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    results.endpoints.content = typeof r.data === "string" ? r.data.substring(0, 2000) : r.data;
+  } catch (err) {
+    results.endpoints.content = { error: err.response?.status, data: err.response?.data || err.message };
+  }
+
+  // 4. /linked-objects
+  try {
+    const r = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/linked-objects`,
+      { headers: { Authorization: `API-Key ${pandadocApiKey}` }, timeout: 30000 }
+    );
+    results.endpoints.linked_objects = r.data;
+  } catch (err) {
+    results.endpoints.linked_objects = { error: err.response?.status, data: err.response?.data || err.message };
+  }
+
+  // 5. /download con separate_files
+  try {
+    const r = await axios.get(
+      `https://api.pandadoc.com/public/v1/documents/${documentId}/download`,
+      {
+        headers: { Authorization: `API-Key ${pandadocApiKey}` },
+        timeout: 30000,
+        responseType: "arraybuffer",
+        params: { separate_files: true },
+      }
+    );
+    const contentType = r.headers["content-type"] || "";
+    results.endpoints.download_separate = {
+      content_type: contentType,
+      size_bytes: r.data.length,
+      is_zip: contentType.includes("zip") || r.data.slice(0, 4).toString("hex") === "504b0304",
+      is_pdf: contentType.includes("pdf"),
+    };
+  } catch (err) {
+    results.endpoints.download_separate = { error: err.response?.status, data: err.response?.data?.toString?.()?.substring(0, 500) || err.message };
+  }
+
+  res.json(results);
+});
+
 // ─── Arranque del servidor ───────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
