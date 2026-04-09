@@ -995,17 +995,37 @@ async function generateCombinedPdfWithLogo(files, logoBytes) {
     const logo = await destDoc.embedPng(logoBytes);
     const logoW = 120;
     const logoH = (logo.height / logo.width) * logoW;
+    const logoMarginTop = 15;
+    const logoTotalHeight = logoH + logoMarginTop + 10; // espacio logo + margen inferior
 
     for (let i = 0; i < srcDoc.getPageCount(); i++) {
-      const [copiedPage] = await destDoc.copyPages(srcDoc, [i]);
-      const { width, height } = copiedPage.getSize();
-      copiedPage.drawImage(logo, {
-        x: width - logoW - 20,
-        y: height - logoH - 15,
+      const srcPage = srcDoc.getPage(i);
+      const { width: srcW, height: srcH } = srcPage.getSize();
+
+      const newPage = destDoc.addPage([srcW, srcH]);
+
+      // Embeber página original y escalarla para dejar espacio al logo arriba
+      const embeddable = await destDoc.embedPage(srcPage);
+      const availableHeight = srcH - logoTotalHeight;
+      const scale = availableHeight / srcH;
+      const contentW = srcW * scale;
+      const contentH = srcH * scale;
+
+      // Contenido redimensionado en la parte inferior
+      newPage.drawPage(embeddable, {
+        x: (srcW - contentW) / 2,
+        y: 0,
+        width: contentW,
+        height: contentH,
+      });
+
+      // Logo centrado arriba
+      newPage.drawImage(logo, {
+        x: (srcW - logoW) / 2,
+        y: srcH - logoH - logoMarginTop,
         width: logoW,
         height: logoH,
       });
-      destDoc.addPage(copiedPage);
     }
     return Buffer.from(await destDoc.save());
   }
