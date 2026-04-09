@@ -955,6 +955,82 @@ app.post("/webhook/validate-license", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Genera un PDF combinado con logo en esquina superior derecha
+// Genera un PDF de 1 sola página con 2 imágenes (frente arriba, reverso abajo) + logo centrado
+async function generateSinglePageWithLogo(files, logoBytes) {
+  const doc = await PDFLib.create();
+  const page = doc.addPage([612, 792]); // Letter size
+  const { width: pw, height: ph } = page.getSize();
+
+  // Reservar espacio para logo arriba
+  const logo = logoBytes ? await doc.embedPng(logoBytes) : null;
+  const logoW = 120;
+  const logoH = logo ? (logo.height / logo.width) * logoW : 0;
+  const logoMarginTop = 15;
+  const logoSpace = logo ? logoH + logoMarginTop + 10 : 0;
+
+  // Espacio disponible para las imágenes
+  const margin = 20;
+  const gap = 10;
+  const availableHeight = ph - logoSpace - margin;
+  const halfHeight = (availableHeight - gap) / 2;
+  const availableWidth = pw - margin * 2;
+
+  // Embeber imágenes
+  const images = [];
+  for (const file of files) {
+    try {
+      const header = file.buffer.slice(0, 4).toString("hex");
+      let img;
+      if (header.startsWith("89504e47")) {
+        img = await doc.embedPng(file.buffer);
+      } else if (header.startsWith("ffd8ff")) {
+        img = await doc.embedJpg(file.buffer);
+      } else {
+        // Es un PDF, extraer primera página como imagen embebida
+        const srcPdf = await PDFLib.load(file.buffer, { ignoreEncryption: true });
+        const embeddedPage = await doc.embedPage(srcPdf.getPage(0));
+        images.push({ type: "page", embed: embeddedPage, width: embeddedPage.width, height: embeddedPage.height });
+        continue;
+      }
+      images.push({ type: "image", embed: img, width: img.width, height: img.height });
+    } catch (err) {
+      console.error(`  ⚠️ No se pudo procesar archivo: ${err.message}`);
+    }
+  }
+
+  // Dibujar imágenes: primera arriba, segunda abajo
+  for (let idx = 0; idx < images.length && idx < 2; idx++) {
+    const item = images[idx];
+    const scale = Math.min(availableWidth / item.width, halfHeight / item.height, 1);
+    const iw = item.width * scale;
+    const ih = item.height * scale;
+
+    // y: primera imagen arriba (justo debajo del logo), segunda abajo
+    const yBase = idx === 0
+      ? ph - logoSpace - ih - (halfHeight - ih) / 2
+      : margin + (halfHeight - ih) / 2;
+    const x = (pw - iw) / 2;
+
+    if (item.type === "image") {
+      page.drawImage(item.embed, { x, y: yBase, width: iw, height: ih });
+    } else {
+      page.drawPage(item.embed, { x, y: yBase, width: iw, height: ih });
+    }
+  }
+
+  // Dibujar logo centrado arriba
+  if (logo) {
+    page.drawImage(logo, {
+      x: (pw - logoW) / 2,
+      y: ph - logoH - logoMarginTop,
+      width: logoW,
+      height: logoH,
+    });
+  }
+
+  return Buffer.from(await doc.save());
+}
+
 async function generateCombinedPdfWithLogo(files, logoBytes) {
   const merged = await PDFLib.create();
 
@@ -1296,36 +1372,69 @@ async function processPandaDocDocuments(body) {
   console.log("📂 Clasificando archivos...");
   const classified = classifyDocFiles(validFiles);
 
+  // ── 5b. Buscar registro en Airtable (por ID + Correo del recipient) ──
+  console.log(`🔍 Buscando en Airtable: ID=${procesoId}, Email=${recipientEmail || "(sin email)"}`);
+  let recordId;
+  let nombreCompleto = recipientName || "";
+  try {
+    const formula = recipientEmail
+      ? `AND({ID} = "${procesoId}", {Correo} = "${recipientEmail}")`
+      : `{ID} = "${procesoId}"`;
+    console.log(`📐 Fórmula: ${formula}`);
+
+    const searchRes = await axios.get(
+      `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}`,
+      {
+        headers: { Authorization: `Bearer ${airtableApiKey}` },
+        params: { filterByFormula: formula, maxRecords: 1 },
+        timeout: 15000,
+      }
+    );
+    if (searchRes.data.records.length > 0) {
+      recordId = searchRes.data.records[0].id;
+      nombreCompleto = searchRes.data.records[0].fields?.["Nombre y Apellido"] || nombreCompleto;
+      console.log(`✅ Registro encontrado: ${recordId} (${nombreCompleto})`);
+    } else {
+      console.error(`❌ No se encontró registro con ID=${procesoId}${recipientEmail ? ` y Correo="${recipientEmail}"` : ""}`);
+      return;
+    }
+  } catch (err) {
+    console.error("❌ Error buscando en Airtable:", err.response?.data || err.message);
+    return;
+  }
+
   // ── 6. Generar PDFs con logo ──
   const logoBytes = fs.existsSync(LOGO_PATH) ? fs.readFileSync(LOGO_PATH) : null;
   if (!logoBytes) console.warn("⚠️ Logo no encontrado");
 
   const generatedPdfs = [];
+  const prefix = `${procesoId} - `;
+  const suffix = ` - ${nombreCompleto}`;
 
   if (classified.ciFront || classified.ciBack) {
-    const pdf = await generateCombinedPdfWithLogo([classified.ciFront, classified.ciBack].filter(Boolean), logoBytes);
-    generatedPdfs.push({ filename: "CI.pdf", buffer: pdf });
-    console.log("📄 CI.pdf generado");
+    const pdf = await generateSinglePageWithLogo([classified.ciFront, classified.ciBack].filter(Boolean), logoBytes);
+    generatedPdfs.push({ filename: `${prefix}CI${suffix}.pdf`, buffer: pdf });
+    console.log(`📄 ${prefix}CI${suffix}.pdf generado`);
   }
   if (classified.titulo) {
     const pdf = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
-    generatedPdfs.push({ filename: "Titulo.pdf", buffer: pdf });
-    console.log("📄 Titulo.pdf generado");
+    generatedPdfs.push({ filename: `${prefix}VT${suffix}.pdf`, buffer: pdf });
+    console.log(`📄 ${prefix}VT${suffix}.pdf generado`);
   }
   if (classified.licFront || classified.licBack) {
-    const pdf = await generateCombinedPdfWithLogo([classified.licFront, classified.licBack].filter(Boolean), logoBytes);
-    generatedPdfs.push({ filename: "Licencia.pdf", buffer: pdf });
-    console.log("📄 Licencia.pdf generado");
+    const pdf = await generateSinglePageWithLogo([classified.licFront, classified.licBack].filter(Boolean), logoBytes);
+    generatedPdfs.push({ filename: `${prefix}LC${suffix}.pdf`, buffer: pdf });
+    console.log(`📄 ${prefix}LC${suffix}.pdf generado`);
   }
   if (classified.hvc) {
     const pdf = await generateCombinedPdfWithLogo([classified.hvc], logoBytes);
-    generatedPdfs.push({ filename: "HojaVida.pdf", buffer: pdf });
-    console.log("📄 HojaVida.pdf generado");
+    generatedPdfs.push({ filename: `${prefix}HVC${suffix}.pdf`, buffer: pdf });
+    console.log(`📄 ${prefix}HVC${suffix}.pdf generado`);
   }
   for (let i = 0; i < classified.otros.length; i++) {
     const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
-    generatedPdfs.push({ filename: `Otro_${i + 1}.pdf`, buffer: pdf });
-    console.log(`📄 Otro_${i + 1}.pdf generado`);
+    generatedPdfs.push({ filename: `${prefix}Otro_${i + 1}${suffix}.pdf`, buffer: pdf });
+    console.log(`📄 ${prefix}Otro_${i + 1}${suffix}.pdf generado`);
   }
 
   // ── 6b. Descargar PDF original (declaraciones firmadas) sin logo ──
@@ -1408,8 +1517,8 @@ async function processPandaDocDocuments(body) {
       for (const p of pagesToKeep) cleanPdf.addPage(p);
 
       const cleanedPdfBytes = await cleanPdf.save();
-      generatedPdfs.push({ filename: "Declaraciones.pdf", buffer: Buffer.from(cleanedPdfBytes) });
-      console.log(`📄 Declaraciones.pdf generado (${cleanPdf.getPageCount()} de ${pageCount} páginas, sin logo)`);
+      generatedPdfs.push({ filename: `${prefix}Declaraciones${suffix}.pdf`, buffer: Buffer.from(cleanedPdfBytes) });
+      console.log(`📄 ${prefix}Declaraciones${suffix}.pdf generado (${cleanPdf.getPageCount()} de ${pageCount} páginas, sin logo)`);
     } catch (err) {
       console.error("⚠️ Error descargando PDF original:", err.message);
     }
@@ -1421,38 +1530,7 @@ async function processPandaDocDocuments(body) {
   }
   console.log(`✅ Total PDFs generados: ${generatedPdfs.length}`);
 
-  // ── 7. Buscar registro en Airtable (por ID + Correo del recipient) ──
-  console.log(`🔍 Buscando en Airtable: ID=${procesoId}, Email=${recipientEmail || "(sin email)"}`);
-  let recordId;
-  try {
-    // Si tenemos email del recipient, buscar con ID + Correo para evitar duplicados
-    const formula = recipientEmail
-      ? `AND({ID} = "${procesoId}", {Correo} = "${recipientEmail}")`
-      : `{ID} = "${procesoId}"`;
-    console.log(`📐 Fórmula: ${formula}`);
-
-    const searchRes = await axios.get(
-      `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}`,
-      {
-        headers: { Authorization: `Bearer ${airtableApiKey}` },
-        params: { filterByFormula: formula, maxRecords: 1 },
-        timeout: 15000,
-      }
-    );
-    if (searchRes.data.records.length > 0) {
-      recordId = searchRes.data.records[0].id;
-      const foundName = searchRes.data.records[0].fields?.["Nombre y Apellido"] || "";
-      console.log(`✅ Registro encontrado: ${recordId} (${foundName})`);
-    } else {
-      console.error(`❌ No se encontró registro con ID=${procesoId}${recipientEmail ? ` y Correo="${recipientEmail}"` : ""}`);
-      return;
-    }
-  } catch (err) {
-    console.error("❌ Error buscando en Airtable:", err.response?.data || err.message);
-    return;
-  }
-
-  // ── 8. Subir PDFs a Airtable ──
+  // ── 7. Subir PDFs a Airtable ──
   console.log(`📤 Subiendo ${generatedPdfs.length} PDFs a Airtable...`);
 
   // Guardar PDFs como temporales y usar la REST API con URLs públicas
