@@ -477,8 +477,10 @@ function buildCoverPage(data) {
       null,
       { label: "Título", value: data.titulo },
       { label: "Establecimiento Educacional", value: data.establecimiento },
-      { label: "Estado", value: "Validado" },
-      { label: "Contacto de Validación", value: data.contacto },
+      ...(data.contacto ? [
+        { label: "Estado", value: "Validado" },
+        { label: "Contacto de Validación", value: data.contacto },
+      ] : []),
     ];
 
     const labelX = 90;
@@ -1376,6 +1378,7 @@ async function processPandaDocDocuments(body) {
   console.log(`🔍 Buscando en Airtable: ID=${procesoId}, Email=${recipientEmail || "(sin email)"}`);
   let recordId;
   let nombreCompleto = recipientName || "";
+  let vtData = {};
   try {
     const formula = recipientEmail
       ? `AND({ID} = "${procesoId}", {Correo} = "${recipientEmail}")`
@@ -1391,8 +1394,19 @@ async function processPandaDocDocuments(body) {
       }
     );
     if (searchRes.data.records.length > 0) {
+      const fields = searchRes.data.records[0].fields || {};
       recordId = searchRes.data.records[0].id;
-      nombreCompleto = searchRes.data.records[0].fields?.["Nombre y Apellido"] || nombreCompleto;
+      nombreCompleto = fields["Nombre y Apellido"] || nombreCompleto;
+      // Guardar datos para la portada VT
+      vtData = {
+        nombre: nombreCompleto,
+        rut: fields["Rut"] || "",
+        cargo: fields["Cargo"] || "",
+        id: fields["ID"] || procesoId,
+        division: fields["División"] || "",
+        titulo: fields["Título"] || "",
+        establecimiento: (fields["Establecimiento"] || [])[0] || "",
+      };
       console.log(`✅ Registro encontrado: ${recordId} (${nombreCompleto})`);
     } else {
       console.error(`❌ No se encontró registro con ID=${procesoId}${recipientEmail ? ` y Correo="${recipientEmail}"` : ""}`);
@@ -1417,9 +1431,21 @@ async function processPandaDocDocuments(body) {
     console.log(`📄 ${prefix}CI${suffix}.pdf generado`);
   }
   if (classified.titulo) {
-    const pdf = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
-    generatedPdfs.push({ filename: `${prefix}VT${suffix}.pdf`, buffer: pdf });
-    console.log(`📄 ${prefix}VT${suffix}.pdf generado`);
+    // Generar portada con tabla de datos + título con logo
+    const coverBytes = await buildCoverPage(vtData);
+    const tituloWithLogo = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
+
+    // Combinar portada + título en un solo PDF
+    const vtDoc = await PDFLib.create();
+    const coverPdf = await PDFLib.load(coverBytes);
+    const coverPages = await vtDoc.copyPages(coverPdf, coverPdf.getPageIndices());
+    for (const p of coverPages) vtDoc.addPage(p);
+    const tituloPdf = await PDFLib.load(tituloWithLogo);
+    const tituloPages = await vtDoc.copyPages(tituloPdf, tituloPdf.getPageIndices());
+    for (const p of tituloPages) vtDoc.addPage(p);
+
+    generatedPdfs.push({ filename: `${prefix}VT${suffix}.pdf`, buffer: Buffer.from(await vtDoc.save()) });
+    console.log(`📄 ${prefix}VT${suffix}.pdf generado (portada + título)`);
   }
   if (classified.licFront || classified.licBack) {
     const pdf = await generateSinglePageWithLogo([classified.licFront, classified.licBack].filter(Boolean), logoBytes);
