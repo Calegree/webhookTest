@@ -463,46 +463,77 @@ function buildCoverPage(data) {
     doc.moveDown(5);
     doc.font("Helvetica-Bold").fontSize(18).text("VALIDACIÓN DE TÍTULO", {
       align: "center",
+      underline: true,
     });
     doc.moveDown(2);
 
-    // Tabla de datos
-    const fields = [
+    // Función para dibujar una tabla con bordes
+    const tableX = 72;
+    const labelW = 150;
+    const valueW = 310;
+    const tableW = labelW + valueW;
+    const cellPadding = 6;
+
+    function drawTable(rows) {
+      let y = doc.y;
+      for (const row of rows) {
+        doc.font("Helvetica").fontSize(11);
+        const valueText = row.value || "";
+        const textH = Math.max(
+          doc.heightOfString(row.label, { width: labelW - cellPadding * 2 }),
+          doc.heightOfString(valueText, { width: valueW - cellPadding * 2 })
+        );
+        const rowH = textH + cellPadding * 2;
+
+        // Bordes de celdas
+        doc.lineWidth(0.5).strokeColor("#000000");
+        doc.rect(tableX, y, labelW, rowH).stroke();
+        doc.rect(tableX + labelW, y, valueW, rowH).stroke();
+
+        // Texto label (izquierda)
+        doc.text(row.label, tableX + cellPadding, y + cellPadding, {
+          width: labelW - cellPadding * 2,
+        });
+        // Texto value (derecha)
+        doc.text(valueText, tableX + labelW + cellPadding, y + cellPadding, {
+          width: valueW - cellPadding * 2,
+        });
+
+        y += rowH;
+      }
+      doc.y = y;
+    }
+
+    // Bloque 1: Nombre y Rut
+    drawTable([
       { label: "Nombre completo", value: data.nombre },
       { label: "Rut", value: data.rut },
-      null, // separador
+    ]);
+
+    doc.moveDown(1);
+
+    // Bloque 2: Cargo, ID, División
+    drawTable([
       { label: "Cargo al que postula", value: data.cargo },
       { label: "ID", value: data.id },
       { label: "División", value: data.division },
-      null,
+    ]);
+
+    doc.moveDown(1);
+
+    // Bloque 3: Título, Establecimiento, Estado, Contacto
+    drawTable([
       { label: "Título", value: data.titulo },
       { label: "Establecimiento Educacional", value: data.establecimiento },
-      ...(data.contacto ? [
-        { label: "Estado", value: "Validado" },
-        { label: "Contacto de Validación", value: data.contacto },
-      ] : []),
-    ];
-
-    const labelX = 90;
-    const valueX = 240;
-    let y = doc.y;
-
-    for (const field of fields) {
-      if (!field) {
-        y += 20;
-        continue;
-      }
-      doc.font("Helvetica").fontSize(12);
-      doc.text(field.label, labelX, y);
-      doc.text(field.value || "", valueX, y, { width: 300 });
-      y += Math.max(20, doc.heightOfString(field.value || "", { width: 300 }) + 6);
-    }
+      { label: "Estado", value: data.contacto ? "Validado" : "" },
+      { label: "Contacto de Validación", value: data.contacto || "" },
+    ]);
 
     // Fecha
+    doc.moveDown(3);
     const now = new Date();
-    const dateStr = `Santiago, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} del ${now.getFullYear()}`;
-    doc.moveDown(4);
-    doc.font("Helvetica").fontSize(11).text(dateStr, labelX - 20);
+    const dateStr = `Santiago, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} de ${now.getFullYear()}`;
+    doc.font("Helvetica").fontSize(11).text(dateStr, tableX);
 
     doc.end();
   });
