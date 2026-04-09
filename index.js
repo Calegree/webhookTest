@@ -1337,44 +1337,74 @@ async function processPandaDocDocuments(body) {
       const pageCount = srcPdf.getPageCount();
       console.log(`📄 PDF original: ${pageCount} páginas`);
 
-      // La página de "ADJUNTAR DOCUMENTOS" (collect files) y las siguientes
-      // son el formulario de subida + los archivos adjuntos renderizados.
-      // Detectamos esa página buscando un cambio brusco de tamaño de página
-      // (las declaraciones son tamaño carta/letter, la de collect files puede diferir)
-      // o usamos heurística: el formulario de collect files suele estar en las últimas ~4 páginas.
-      // Copiamos solo las páginas previas al formulario.
-      let collectPageIndex = pageCount; // por defecto, mantener todas
+      // Detectar la página de "ADJUNTAR DOCUMENTOS" (collect files).
+      // El texto de PandaDoc está embebido con font encoding custom, no se puede leer directo.
+      // Heurística: la página de collect files es la primera página (después de las declaraciones)
+      // cuyo content stream principal es corto (~12k) seguida de páginas con streams muy cortos
+      // (<2k), que son las previsualizaciones de los archivos adjuntos.
+      // Las páginas de declaraciones tienen streams de 8k-50k.
+      const zlib = require("zlib");
+      let collectPageIndex = -1;
+
       for (let i = 0; i < pageCount; i++) {
         const page = srcPdf.getPage(i);
-        // Buscar en los operadores de texto del content stream
-        try {
-          const contents = page.node.get(PDFName.of("Contents"));
-          if (contents) {
-            const ref = contents instanceof PDFRef ? page.node.context.lookup(contents) : contents;
-            let raw = "";
-            if (ref && typeof ref.decodeStream === "function") {
-              raw = Buffer.from(ref.decodeStream()).toString("latin1");
-            } else if (ref && typeof ref.getContentsString === "function") {
-              raw = ref.getContentsString();
+        const contentsRef = page.node.get(PDFName.of("Contents"));
+        if (!contentsRef || contentsRef.constructor.name !== "PDFArray") continue;
+
+        let fullText = "";
+        for (let j = 0; j < contentsRef.size(); j++) {
+          const ref = contentsRef.get(j);
+          const stream = ref instanceof PDFRef ? page.node.context.lookup(ref) : ref;
+          try {
+            const raw = stream.contents;
+            if (raw) {
+              try { fullText += zlib.inflateSync(Buffer.from(raw)).toString("utf-8"); }
+              catch { fullText += Buffer.from(raw).toString("latin1"); }
             }
-            if (raw.includes("ADJUNTAR") || raw.includes("DOCUMENTO SOLICITADO")) {
+          } catch {}
+        }
+
+        // Buscar texto "ADJUNTAR" en el content stream o en XObjects
+        if (fullText.includes("ADJUNTAR") || fullText.includes("DOCUMENTO SOLICITADO")) {
+          collectPageIndex = i;
+          console.log(`🔍 Página de collect files detectada por texto: ${i + 1}`);
+          break;
+        }
+
+        // Heurística: detectar la página de collect files por su patrón
+        // Es la primera página cuyo stream tiene <15k y la siguiente tiene <2k
+        if (i > 5 && fullText.length < 15000 && i + 1 < pageCount) {
+          const nextPage = srcPdf.getPage(i + 1);
+          const nextContents = nextPage.node.get(PDFName.of("Contents"));
+          if (nextContents && nextContents.constructor.name === "PDFArray") {
+            let nextText = "";
+            for (let j = 0; j < nextContents.size(); j++) {
+              const ref = nextContents.get(j);
+              const stream = ref instanceof PDFRef ? nextPage.node.context.lookup(ref) : ref;
+              try {
+                const raw = stream.contents;
+                if (raw) {
+                  try { nextText += zlib.inflateSync(Buffer.from(raw)).toString("utf-8"); }
+                  catch { nextText += Buffer.from(raw).toString("latin1"); }
+                }
+              } catch {}
+            }
+            if (nextText.length < 2000) {
               collectPageIndex = i;
-              console.log(`🔍 Página de collect files detectada: ${i + 1}`);
+              console.log(`🔍 Página de collect files detectada por heurística: ${i + 1} (stream=${fullText.length}, siguiente=${nextText.length})`);
               break;
             }
           }
-        } catch {}
+        }
       }
 
-      // Fallback: si no se detectó, quitar las últimas 4 páginas (collect + adjuntos)
-      if (collectPageIndex === pageCount && pageCount > 4) {
-        collectPageIndex = pageCount - 4;
-        console.log(`⚠️ Fallback: eliminando desde página ${collectPageIndex + 1}`);
-      }
-
-      // Crear nuevo PDF solo con las páginas de declaraciones
+      // Crear nuevo PDF excluyendo solo la página de collect files
       const cleanPdf = await PDFLib.create();
-      const pagesToKeep = await cleanPdf.copyPages(srcPdf, Array.from({ length: collectPageIndex }, (_, i) => i));
+      const indicesToKeep = [];
+      for (let i = 0; i < pageCount; i++) {
+        if (i !== collectPageIndex) indicesToKeep.push(i);
+      }
+      const pagesToKeep = await cleanPdf.copyPages(srcPdf, indicesToKeep);
       for (const p of pagesToKeep) cleanPdf.addPage(p);
 
       const cleanedPdfBytes = await cleanPdf.save();
