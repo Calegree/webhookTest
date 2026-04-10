@@ -983,8 +983,6 @@ app.get("/test/universidades", (req, res) => {
 // POST /webhook/validate-license — Valida Hoja de Vida del Conductor (Airtable)
 // ─────────────────────────────────────────────────────────────────────────────
 const { validateDriverLicense } = require("./lib/license-validator");
-const { extractLicenseData } = require("./lib/claude-vision");
-const { verificarCertificado } = require("./lib/registro-civil");
 
 app.post("/webhook/validate-license", async (req, res) => {
   console.log("📦 [HVC] Body recibido:", JSON.stringify(req.body, null, 2));
