@@ -983,6 +983,8 @@ app.get("/test/universidades", (req, res) => {
 // POST /webhook/validate-license — Valida Hoja de Vida del Conductor (Airtable)
 // ─────────────────────────────────────────────────────────────────────────────
 const { validateDriverLicense } = require("./lib/license-validator");
+const { extractLicenseData } = require("./lib/claude-vision");
+const { verificarCertificado } = require("./lib/registro-civil");
 
 app.post("/webhook/validate-license", async (req, res) => {
   console.log("📦 [HVC] Body recibido:", JSON.stringify(req.body, null, 2));
@@ -1537,9 +1539,33 @@ async function processPandaDocDocuments(body) {
     console.log(`📄 ${prefix}LC${suffix}.pdf generado`);
   }
   if (classified.hvc) {
+    // Validar HVC automáticamente contra el Registro Civil
+    let hvcValidado = false;
+    try {
+      console.log(`   🔍 Validando HVC contra Registro Civil...`);
+      const extracted = await extractLicenseData(classified.hvc.buffer);
+      console.log(`   📝 Datos HVC: Folio=${extracted.folio || '-'}, RUT=${extracted.rut || '-'}, CVE=${extracted.codigo_verificacion || '-'}`);
+
+      if (extracted.folio && extracted.codigo_verificacion) {
+        const verificacion = await verificarCertificado(extracted.folio, extracted.codigo_verificacion);
+        console.log(`   📋 Resultado RC: ${verificacion.mensaje}`);
+        if (verificacion.valido === true) {
+          hvcValidado = true;
+          console.log(`   ✅ HVC VALIDADO`);
+        } else {
+          console.log(`   ❌ HVC no validado`);
+        }
+      } else {
+        console.log(`   ⚠️ No se pudo extraer folio/CVE del HVC, no se puede validar`);
+      }
+    } catch (err) {
+      console.warn(`   ⚠️ Error validando HVC: ${err.message}`);
+    }
+
+    const hvcLabel = hvcValidado ? `${prefix}HVC VALIDADO${suffix}.pdf` : `${prefix}HVC${suffix}.pdf`;
     const pdf = await generateCombinedPdfWithLogo([classified.hvc], logoBytes);
-    generatedPdfs.push({ filename: `${prefix}HVC${suffix}.pdf`, buffer: pdf });
-    console.log(`📄 ${prefix}HVC${suffix}.pdf generado`);
+    generatedPdfs.push({ filename: hvcLabel, buffer: pdf });
+    console.log(`📄 ${hvcLabel} generado`);
   }
   for (let i = 0; i < classified.otros.length; i++) {
     const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
