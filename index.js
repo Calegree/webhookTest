@@ -1408,7 +1408,7 @@ async function processPandaDocDocuments(body) {
   let vtData = {};
   try {
     const formula = recipientEmail
-      ? `AND({ID} = "${procesoId}", {Correo} = "${recipientEmail}")`
+      ? `AND({ID} = "${procesoId}", LOWER({Correo}) = "${recipientEmail.toLowerCase()}")`
       : `{ID} = "${procesoId}"`;
     console.log(`📐 Fórmula: ${formula}`);
 
