@@ -49,52 +49,34 @@ const FACE_PX = 500; // resolución interna alta para buena calidad
 // ─── Almacén temporal de imágenes en memoria ─────────────────────────────────
 const tempImages = new Map();
 
-// ─── Recorte de rostro desde PDF de carnet (layout: logo + frente + reverso) ─
-// El PDF convertido a imagen tiene esta estructura:
-//   ~0-12%  → Logo Transearch
-//   ~12-55% → Carnet frente (la foto está en el lado izquierdo del carnet)
-//   ~55-95% → Carnet reverso
-// Dentro del carnet frente, la foto ocupa aprox el 30% izquierdo
+// ─── Recorte de rostro desde imagen de carnet usando detección facial ────────
+const { detectFace } = require("./lib/face-detector");
+
 async function cropFaceFromCarnet(imageBuffer) {
   const meta = await sharp(imageBuffer, { failOn: "none" }).metadata();
-  const w = meta.width;
-  const h = meta.height;
+  console.log(`📐 Imagen original: ${meta.width}×${meta.height}px`);
 
-  // Primero extraer solo el carnet frente (mitad superior, sin logo)
-  const carnetTop = Math.round(h * 0.13);
-  const carnetHeight = Math.round(h * 0.40);
+  // Detectar rostro automáticamente (prueba rotaciones si es necesario)
+  const face = await detectFace(imageBuffer);
 
-  console.log(`📐 Imagen original: ${w}×${h}px`);
-  console.log(`📐 Extrayendo carnet frente: y=${carnetTop}, h=${carnetHeight}`);
+  if (!face) {
+    console.warn("⚠️ No se detectó rostro, usando recorte por posición fija (fallback)");
+    return cropFaceByPosition(imageBuffer);
+  }
 
-  const carnetFront = await sharp(imageBuffer, { failOn: "none" })
-    .extract({
-      left: 0,
-      top: carnetTop,
-      width: w,
-      height: Math.min(carnetHeight, h - carnetTop),
-    })
-    .toBuffer();
+  console.log(`🎯 Rostro detectado: confianza=${face.confidence.toFixed(2)}, rotación=${face.rotation}°, pos=(${face.left},${face.top}) ${face.width}×${face.height}px`);
 
-  // Ahora del carnet frente, extraer la zona de la foto (lado izquierdo)
-  const carnetMeta = await sharp(carnetFront, { failOn: "none" }).metadata();
-  const cw = carnetMeta.width;
-  const ch = carnetMeta.height;
+  // Expandir el recorte un 30% alrededor de la cara para incluir cabeza completa
+  const faceMeta = await sharp(face.buffer, { failOn: "none" }).metadata();
+  const padX = Math.round(face.width * 0.3);
+  const padY = Math.round(face.height * 0.3);
+  const left = Math.max(0, face.left - padX);
+  const top = Math.max(0, face.top - padY);
+  const right = Math.min(faceMeta.width, face.left + face.width + padX);
+  const bottom = Math.min(faceMeta.height, face.top + face.height + padY);
 
-  const faceLeft = Math.round(cw * 0.12);
-  const faceTop = Math.round(ch * 0.05);
-  const faceWidth = Math.round(cw * 0.22);
-  const faceHeight = Math.round(ch * 0.70);
-
-  console.log(`📐 Carnet frente: ${cw}×${ch}px, recortando cara: ${faceWidth}×${faceHeight}px desde (${faceLeft},${faceTop})`);
-
-  const faceRegion = await sharp(carnetFront, { failOn: "none" })
-    .extract({
-      left: faceLeft,
-      top: faceTop,
-      width: Math.min(faceWidth, cw - faceLeft),
-      height: Math.min(faceHeight, ch - faceTop),
-    })
+  const faceRegion = await sharp(face.buffer, { failOn: "none" })
+    .extract({ left, top, width: right - left, height: bottom - top })
     .toBuffer();
 
   const outW = FACE_PX;
@@ -109,6 +91,43 @@ async function cropFaceFromCarnet(imageBuffer) {
 
   console.log(`✂️  Rostro recortado a ${outW}×${outH}px (retrato 3:4, escala de grises)`);
   return processedImage;
+}
+
+// Fallback: recorte por posición fija (layout original: logo + frente + reverso)
+async function cropFaceByPosition(imageBuffer) {
+  const meta = await sharp(imageBuffer, { failOn: "none" }).metadata();
+  const w = meta.width;
+  const h = meta.height;
+
+  const carnetTop = Math.round(h * 0.13);
+  const carnetHeight = Math.round(h * 0.40);
+
+  const carnetFront = await sharp(imageBuffer, { failOn: "none" })
+    .extract({ left: 0, top: carnetTop, width: w, height: Math.min(carnetHeight, h - carnetTop) })
+    .toBuffer();
+
+  const carnetMeta = await sharp(carnetFront, { failOn: "none" }).metadata();
+  const cw = carnetMeta.width;
+  const ch = carnetMeta.height;
+
+  const faceRegion = await sharp(carnetFront, { failOn: "none" })
+    .extract({
+      left: Math.round(cw * 0.12),
+      top: Math.round(ch * 0.05),
+      width: Math.min(Math.round(cw * 0.22), cw - Math.round(cw * 0.12)),
+      height: Math.min(Math.round(ch * 0.70), ch - Math.round(ch * 0.05)),
+    })
+    .toBuffer();
+
+  const outW = FACE_PX;
+  const outH = Math.round(FACE_PX * 1.33);
+
+  return sharp(faceRegion)
+    .resize(outW, outH, { fit: "cover", position: "centre" })
+    .grayscale()
+    .linear(0.85, 30)
+    .jpeg({ quality: 95 })
+    .toBuffer();
 }
 
 // ─── Healthcheck ─────────────────────────────────────────────────────────────
