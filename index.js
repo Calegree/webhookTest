@@ -255,19 +255,36 @@ app.post("/insert-photo", async (req, res) => {
     const docTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS || "tblwulQitACgXEdya";
     const docApiKey = process.env.AIRTABLE_API_KEY_DOCUMENTS || AIRTABLE_API_KEY;
 
-    const formula = `AND({ID} = "${numero_id_proceso}", {Nombre y Apellido} = "${nombre_candidato}")`;
-    const searchRes = await axios.get(
+    // 1) Buscar por ID + nombre exacto
+    let formula = `AND({ID} = "${numero_id_proceso}", {Nombre y Apellido} = "${nombre_candidato}")`;
+    const searchOpts = {
+      headers: { Authorization: `Bearer ${docApiKey}` },
+      timeout: 15000,
+    };
+    let searchRes = await axios.get(
       `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
-      {
-        headers: { Authorization: `Bearer ${docApiKey}` },
-        params: { filterByFormula: formula, maxRecords: 1 },
-        timeout: 15000,
-      }
+      { ...searchOpts, params: { filterByFormula: formula, maxRecords: 1 } }
     );
+
+    // 2) Si no encuentra, buscar por ID + apellidos parciales (FIND en Airtable)
+    if (searchRes.data.records.length === 0) {
+      const palabras = nombre_candidato.split(/\s+/).filter((p) => p.length >= 4);
+      if (palabras.length > 0) {
+        // Usar las últimas 2 palabras (apellidos) o todas si son pocas
+        const apellidos = palabras.slice(-2);
+        const findConditions = apellidos.map((p) => `FIND("${p}", {Nombre y Apellido})`).join(", ");
+        formula = `AND({ID} = "${numero_id_proceso}", ${findConditions})`;
+        console.log(`⚠️ No encontrado con nombre exacto, buscando con apellidos: ${apellidos.join(", ")}`);
+        searchRes = await axios.get(
+          `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
+          { ...searchOpts, params: { filterByFormula: formula, maxRecords: 5 } }
+        );
+      }
+    }
 
     if (searchRes.data.records.length === 0) {
       return res.status(404).json({
-        error: `No se encontró registro con ID=${numero_id_proceso} y Nombre=${nombre_candidato}`,
+        error: `No se encontró registro con ID=${numero_id_proceso} y Nombre="${nombre_candidato}"`,
       });
     }
 
