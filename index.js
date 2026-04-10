@@ -525,7 +525,7 @@ function buildCoverPage(data) {
     drawTable([
       { label: "Título", value: data.titulo },
       { label: "Establecimiento Educacional", value: data.establecimiento },
-      { label: "Estado", value: data.contacto ? "Validado" : "" },
+      { label: "Estado", value: data.estado || "" },
       { label: "Contacto de Validación", value: data.contacto || "" },
     ]);
 
@@ -848,10 +848,6 @@ const TEST_TITULOS = {
   uta: path.join(__dirname, "assets", "U tarapaca CertificadodeTtulo.pdf"),
   ucv: path.join(__dirname, "assets", "UCV certificadoJaviera.pdf"),
   uac: path.join(__dirname, "assets", "U Aconcagua CertificadoJosSoto.pdf"),
-  inacap: path.join(__dirname, "assets", "Inacap CertificadottuloING.EVELYNAGUILERA.pdf"),
-  inacap2: path.join(__dirname, "assets", "Inacap 3.pdf"),
-  uv: path.join(__dirname, "assets", "U de valparaiso TituloEricCarrascoCarrasco.pdf"),
-  bolivariana: path.join(__dirname, "assets", "U bolivariana titulo.pdf"),
 };
 
 app.get("/test/validate-titulo/:archivo", async (req, res) => {
@@ -1462,6 +1458,27 @@ async function processPandaDocDocuments(body) {
     console.log(`📄 ${prefix}CI${suffix}.pdf generado`);
   }
   if (classified.titulo) {
+    // Validar título automáticamente si la universidad es soportada
+    try {
+      const tituloData = await extractTituloData(classified.titulo.buffer);
+      // Rellenar datos de la portada desde el PDF si vienen vacíos de Airtable
+      if (!vtData.titulo && tituloData.titulo) vtData.titulo = tituloData.titulo;
+      if (!vtData.establecimiento && tituloData.universidad) vtData.establecimiento = tituloData.universidad;
+      console.log(`   📝 Datos del PDF: título="${tituloData.titulo || '-'}" universidad="${tituloData.universidad || '-'}"`);
+      if (tituloData.universidad_key && !tituloData.es_documento_fisico) {
+        console.log(`   🔍 Validando título en ${tituloData.universidad}...`);
+        const verificacion = await validarTitulo(tituloData.universidad_key, tituloData);
+        if (verificacion.valido === true) {
+          vtData.estado = "Validado";
+        } else if (verificacion.valido === false) {
+          vtData.estado = "Rechazado";
+        }
+        console.log(`   📋 Resultado validación: ${vtData.estado || "REQUIERE REVISIÓN"}`);
+      }
+    } catch (err) {
+      console.warn(`   ⚠️ Error validando título: ${err.message}`);
+    }
+
     // Generar portada con tabla de datos + título con logo
     const coverBytes = await buildCoverPage(vtData);
     const tituloWithLogo = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
