@@ -1,6 +1,7 @@
 node_modules/
 credentials.json
 .env
+.claude/settings.local.json
 *.pdf
 !88597*HVC*.pdf
 !Hoja84571-HVC*.pdf
