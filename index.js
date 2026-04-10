@@ -1992,8 +1992,29 @@ async function markRetiradoInBase(config, procesoId, rut) {
   }
 }
 
-// Almacén de cursors por webhook para no reprocesar payloads viejos
-const webhookCursors = new Map();
+// Almacén de cursors por webhook persistido en disco para sobrevivir reinicios
+const CURSORS_PATH = path.join(__dirname, ".webhook-cursors.json");
+
+function loadCursors() {
+  try {
+    if (fs.existsSync(CURSORS_PATH)) {
+      return new Map(Object.entries(JSON.parse(fs.readFileSync(CURSORS_PATH, "utf8"))));
+    }
+  } catch (err) {
+    console.warn("⚠️ Error cargando cursors:", err.message);
+  }
+  return new Map();
+}
+
+function saveCursors(cursors) {
+  try {
+    fs.writeFileSync(CURSORS_PATH, JSON.stringify(Object.fromEntries(cursors)));
+  } catch (err) {
+    console.warn("⚠️ Error guardando cursors:", err.message);
+  }
+}
+
+const webhookCursors = loadCursors();
 
 // Endpoint que recibe notificaciones de Airtable Webhook
 app.post("/webhook/sync-retirado", async (req, res) => {
@@ -2042,10 +2063,17 @@ app.post("/webhook/sync-retirado", async (req, res) => {
     // Guardar nuevo cursor para la próxima vez
     if (payloadsRes.data.cursor) {
       webhookCursors.set(webhook.id, payloadsRes.data.cursor);
+      saveCursors(webhookCursors);
     }
 
     const payloads = payloadsRes.data.payloads || [];
     console.log(`   📦 ${payloads.length} payload(s) nuevos (cursor: ${savedCursor || "inicio"} → ${payloadsRes.data.cursor})`);
+
+    // Si no había cursor guardado, es el primer arranque: solo guardar cursor, no procesar históricos
+    if (!savedCursor) {
+      console.log("   ⏭️ Primer arranque: saltando payloads históricos, guardando cursor para futuros eventos");
+      return;
+    }
 
     if (payloads.length === 0) return;
 

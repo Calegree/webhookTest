@@ -2,6 +2,7 @@ node_modules/
 credentials.json
 .env
 .claude/settings.local.json
+.webhook-cursors.json
 *.pdf
 !88597*HVC*.pdf
 !Hoja84571-HVC*.pdf
