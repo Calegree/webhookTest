@@ -575,6 +575,40 @@ function buildCoverPage(data) {
   });
 }
 
+function buildHvcCoverPage() {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "LETTER", margin: 50 });
+    const chunks = [];
+    doc.on("data", (c) => chunks.push(c));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    // Logo centrado arriba
+    if (fs.existsSync(LOGO_PATH)) {
+      doc.image(LOGO_PATH, 170, 80, { width: 250 });
+    }
+
+    // "Validación" centrado
+    doc.moveDown(10);
+    doc.font("Helvetica-Bold").fontSize(28).text("Validación", { align: "center" });
+
+    // "Hoja de Vida Conductor" centrado
+    doc.moveDown(0.5);
+    doc.font("Helvetica-Bold").fontSize(28).text("Hoja de Vida Conductor", { align: "center" });
+
+    // "Transearch" centrado
+    doc.moveDown(2);
+    doc.font("Helvetica-Bold").fontSize(24).text("Transearch", { align: "center" });
+
+    // Fecha abajo a la derecha
+    const now = new Date();
+    const dateStr = `Santiago, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} de ${now.getFullYear()}`;
+    doc.font("Helvetica").fontSize(12).text(dateStr, 50, 600, { align: "right" });
+
+    doc.end();
+  });
+}
+
 async function downloadAttachments(documentos) {
   // documentos puede ser: string JSON de array, string de URLs separadas por coma, o ya un array
   let urls = [];
@@ -1561,9 +1595,22 @@ async function processPandaDocDocuments(body) {
     }
 
     const hvcLabel = hvcValidado ? `${prefix}HVC VALIDADO${suffix}.pdf` : `${prefix}HVC${suffix}.pdf`;
-    const pdf = await generateCombinedPdfWithLogo([classified.hvc], logoBytes);
-    generatedPdfs.push({ filename: hvcLabel, buffer: pdf });
-    console.log(`📄 ${hvcLabel} generado`);
+
+    // Generar portada HVC + documento con logo
+    const hvcCoverBytes = await buildHvcCoverPage();
+    const hvcWithLogo = await generateCombinedPdfWithLogo([classified.hvc], logoBytes);
+
+    // Combinar portada + HVC en un solo PDF
+    const hvcDoc = await PDFLib.create();
+    const hvcCoverPdf = await PDFLib.load(hvcCoverBytes);
+    const hvcCoverPages = await hvcDoc.copyPages(hvcCoverPdf, hvcCoverPdf.getPageIndices());
+    for (const p of hvcCoverPages) hvcDoc.addPage(p);
+    const hvcContentPdf = await PDFLib.load(hvcWithLogo);
+    const hvcContentPages = await hvcDoc.copyPages(hvcContentPdf, hvcContentPdf.getPageIndices());
+    for (const p of hvcContentPages) hvcDoc.addPage(p);
+
+    generatedPdfs.push({ filename: hvcLabel, buffer: Buffer.from(await hvcDoc.save()) });
+    console.log(`📄 ${hvcLabel} generado (portada + HVC)`);
   }
   for (let i = 0; i < classified.otros.length; i++) {
     const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
