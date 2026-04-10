@@ -1966,8 +1966,14 @@ async function markRetiradoInBase(config, procesoId, rut) {
       }
     );
     for (const record of searchRes.data.records) {
-      const recordRut = normalizeRut(record.fields[config.rutField]);
-      if (recordRut && normalRut && recordRut !== normalRut) continue; // RUT distinto, saltar
+      const rawRut = record.fields[config.rutField];
+      const recordRut = normalizeRut(rawRut);
+      console.log(`   🔎 Comparando RUT: original="${rawRut}" → normalizado="${recordRut}" vs buscado="${normalRut}" (original: "${rut}")`);
+      // Solo marcar si el RUT coincide exactamente (evita marcar otra persona con mismo ID)
+      if (!normalRut || !recordRut || recordRut !== normalRut) {
+        console.log(`   ⏭️ RUT no coincide, saltando record=${record.id}`);
+        continue;
+      }
 
       if (record.fields[config.retiradoFieldName]) continue; // Ya marcado
 
@@ -1986,12 +1992,15 @@ async function markRetiradoInBase(config, procesoId, rut) {
   }
 }
 
+// Almacén de cursors por webhook para no reprocesar payloads viejos
+const webhookCursors = new Map();
+
 // Endpoint que recibe notificaciones de Airtable Webhook
 app.post("/webhook/sync-retirado", async (req, res) => {
   console.log("\n🔴 [SYNC-RETIRADO] Notificación recibida");
   res.status(200).json({ ok: true });
 
-  const { base, cursor } = req.body || {};
+  const { base } = req.body || {};
   if (!base?.id) {
     console.log("   ⚠️ Sin base.id en el body, ignorando");
     return;
@@ -2019,23 +2028,37 @@ app.post("/webhook/sync-retirado", async (req, res) => {
       return;
     }
 
-    // Obtener payloads pendientes
+    // Usar cursor guardado para solo obtener payloads NUEVOS
+    const savedCursor = webhookCursors.get(webhook.id);
     const payloadsRes = await axios.get(
       `https://api.airtable.com/v0/bases/${base.id}/webhooks/${webhook.id}/payloads`,
       {
         headers: { Authorization: `Bearer ${SYNC_API_KEY}` },
-        params: cursor ? { cursor } : {},
+        params: savedCursor ? { cursor: savedCursor } : {},
         timeout: 15000,
       }
     );
 
+    // Guardar nuevo cursor para la próxima vez
+    if (payloadsRes.data.cursor) {
+      webhookCursors.set(webhook.id, payloadsRes.data.cursor);
+    }
+
     const payloads = payloadsRes.data.payloads || [];
-    console.log(`   📦 ${payloads.length} payload(s)`);
+    console.log(`   📦 ${payloads.length} payload(s) nuevos (cursor: ${savedCursor || "inicio"} → ${payloadsRes.data.cursor})`);
+
+    if (payloads.length === 0) return;
+
+    // Deduplicar: solo procesar cada record UNA vez por batch
+    const processedRecords = new Set();
 
     for (const payload of payloads) {
       const changedRecords = payload.changedTablesById?.[origenConfig.tableId]?.changedRecordsById || {};
 
       for (const [recordId, changes] of Object.entries(changedRecords)) {
+        // Skip si ya procesamos este record en este batch
+        if (processedRecords.has(recordId)) continue;
+
         const changedFields = changes.current?.cellValuesByFieldId || {};
 
         // Verificar si algún campo trigger cambió a valor de retiro
@@ -2050,6 +2073,7 @@ app.post("/webhook/sync-retirado", async (req, res) => {
 
         if (!triggered) continue;
 
+        processedRecords.add(recordId);
         console.log(`   🔴 Record ${recordId} → RETIRADO detectado`);
 
         // Obtener ID y RUT del record
@@ -2065,6 +2089,10 @@ app.post("/webhook/sync-retirado", async (req, res) => {
           console.log(`   ⚠️ Record sin ID, saltando`);
           continue;
         }
+        if (!rut) {
+          console.log(`   ⚠️ Record sin RUT, saltando (se requiere RUT para sync preciso)`);
+          continue;
+        }
         console.log(`   📋 ID=${procesoId}, RUT=${rut}`);
 
         // Marcar Retirado en TODAS las bases (incluyendo la de origen)
@@ -2073,6 +2101,12 @@ app.post("/webhook/sync-retirado", async (req, res) => {
           await markRetiradoInBase(config, procesoId, rut);
         }
       }
+    }
+
+    if (processedRecords.size === 0) {
+      console.log("   ✅ Sin cambios de retiro en este batch");
+    } else {
+      console.log(`   ✅ ${processedRecords.size} record(s) procesados`);
     }
   } catch (err) {
     console.error(`   ❌ Error procesando payloads: ${err.response?.data || err.message}`);
