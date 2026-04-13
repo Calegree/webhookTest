@@ -1919,7 +1919,7 @@ const BASES_CONFIG = {
     tableId: "tblbXWtnhMuc54XkO",
     idField: "ID",
     rutField: "Rut",
-    retiradoFieldId: null, // Pendiente: crear cuando se desactive sandbox
+    retiradoFieldId: null, // Pendiente: crear campo en producción
     retiradoFieldName: "Retirado",
     triggers: [
       { field: "Estado", fieldId: "fld0ZPsshHZOtpgLN", values: ["Descarte", "Desiste", "CANCELADO", "No se gestiona"] },
@@ -2230,6 +2230,264 @@ app.get("/refresh-retirado-webhooks", async (req, res) => {
     }
   }
   res.json({ webhooks: results });
+});
+
+// ─── Extracción de Vigencias de Exámenes Médicos (SF-321) ───────────────────
+const Groq = require("groq-sdk");
+
+const VIGENCIA_CONFIG = {
+  baseId: "appTDqX5xPNm7uUqU",
+  tableId: "tblbXWtnhMuc54XkO",
+  attachmentFieldId: "fldENO6064PkEn8gd", // Informes médicos
+  vigenciaFieldId: "fldj26EkDSGQfBxD7",   // Vigencia Exámenes
+  vigenciaFieldName: "Vigencia Exámenes",
+  apiKey: process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_API_KEY,
+};
+
+/**
+ * Extrae texto de un PDF usando pdfjs-dist
+ */
+async function extractTextFromPdfBuffer(pdfBuffer) {
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const uint8 = new Uint8Array(pdfBuffer);
+  const doc = await pdfjsLib.getDocument({ data: uint8 }).promise;
+
+  let fullText = "";
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items.map((item) => item.str).join(" ");
+    fullText += pageText + "\n";
+  }
+  return fullText;
+}
+
+/**
+ * Envía texto a Groq para extraer vigencias de exámenes médicos
+ */
+async function extractVigenciasWithGroq(textosPdfs) {
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+  const completion = await groq.chat.completions.create({
+    model: "llama-3.3-70b-versatile",
+    messages: [
+      {
+        role: "system",
+        content:
+          "Eres un experto en certificados médicos laborales chilenos (ACHS, IST, Mutual). Extraes información de vigencia de exámenes médicos.",
+      },
+      {
+        role: "user",
+        content: `Analiza los siguientes textos extraídos de certificados médicos. Para CADA certificado, extrae:
+1) Tipo de examen (ej: Evaluación Laboral de Salud - Altitud Geográfica, Psicosensotécnico, Ruido, Sílice, etc.)
+2) Fecha de vigencia o vencimiento
+3) Conclusión (Apto, No Apto, etc.)
+
+Responde SOLO con el listado en este formato exacto, un examen por línea:
+Tipo de examen | Vigencia: DD/MM/YYYY | Conclusión: resultado
+
+Si no encuentras fecha de vigencia, pon "Vigencia: No especificada"
+Si hay múltiples certificados, lista todos.
+
+Textos de los certificados:
+${textosPdfs}`,
+      },
+    ],
+    temperature: 0,
+    max_tokens: 2000,
+  });
+
+  return completion.choices[0].message.content.trim();
+}
+
+/**
+ * Procesa un registro: descarga PDFs, extrae texto, analiza con Groq, escribe resultado
+ */
+async function procesarVigenciaRegistro(record) {
+  const fields = record.fields;
+  const recordId = record.id;
+  const procesoId = fields.ID || "?";
+
+  // Buscar adjuntos en el campo de informes médicos (por nombre o por fieldId)
+  let attachments = null;
+  for (const [key, val] of Object.entries(fields)) {
+    if (Array.isArray(val) && val.length > 0 && val[0].url && val[0].filename) {
+      // Verificar si es el campo correcto comparando con nombres conocidos
+      if (key.includes("nformes") && key.includes("dicos")) {
+        attachments = val;
+        break;
+      }
+    }
+  }
+
+  if (!attachments || attachments.length === 0) {
+    return { recordId, procesoId, status: "sin_adjuntos" };
+  }
+
+  // Descargar y extraer texto de cada PDF
+  let textosCombinados = "";
+  let procesados = 0;
+
+  for (const att of attachments) {
+    if (att.type !== "application/pdf") continue;
+    try {
+      const response = await axios.get(att.url, {
+        responseType: "arraybuffer",
+        timeout: 30000,
+      });
+      const texto = await extractTextFromPdfBuffer(Buffer.from(response.data));
+      textosCombinados += `\n--- Documento: ${att.filename} ---\n${texto}\n`;
+      procesados++;
+    } catch (err) {
+      console.log(`   ⚠️ Error descargando ${att.filename}: ${err.message}`);
+    }
+  }
+
+  if (procesados === 0) {
+    return { recordId, procesoId, status: "sin_pdfs_validos" };
+  }
+
+  // Enviar a Groq para análisis
+  const vigencias = await extractVigenciasWithGroq(textosCombinados);
+
+  // Escribir resultado en Airtable
+  await axios.patch(
+    `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}/${recordId}`,
+    { fields: { [VIGENCIA_CONFIG.vigenciaFieldName]: vigencias } },
+    {
+      headers: {
+        Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 15000,
+    }
+  );
+
+  return { recordId, procesoId, status: "ok", pdfs: procesados };
+}
+
+/**
+ * GET /procesar-vigencias-historicas
+ * Procesa registros existentes en lotes de 10 con pausa entre lotes
+ */
+app.get("/procesar-vigencias-historicas", async (req, res) => {
+  const batchSize = parseInt(req.query.batch) || 10;
+  const delayMs = parseInt(req.query.delay) || 5000;
+  const maxRecords = parseInt(req.query.max) || 0; // 0 = todos
+
+  console.log(`\n📋 [VIGENCIAS] Iniciando procesamiento histórico (batch=${batchSize}, delay=${delayMs}ms)`);
+  res.json({ ok: true, message: "Procesamiento iniciado en background. Ver logs del servidor." });
+
+  // Ejecutar en background
+  (async () => {
+    let offset = null;
+    let totalProcesados = 0;
+    let totalOk = 0;
+    let totalSkip = 0;
+    let totalError = 0;
+
+    try {
+      do {
+        // Obtener lote de registros
+        let url = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?pageSize=${batchSize}`;
+        url += `&fields%5B%5D=ID`;
+        url += `&fields%5B%5D=${VIGENCIA_CONFIG.attachmentFieldId}`;
+        url += `&fields%5B%5D=${VIGENCIA_CONFIG.vigenciaFieldId}`;
+        if (offset) url += `&offset=${encodeURIComponent(offset)}`;
+
+        const listRes = await axios.get(url, {
+          headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+          timeout: 30000,
+        });
+
+        const records = listRes.data.records || [];
+        offset = listRes.data.offset || null;
+
+        for (const record of records) {
+          // Saltar si ya tiene vigencia escrita
+          const vigenciaActual = record.fields[VIGENCIA_CONFIG.vigenciaFieldName] || record.fields["Vigencia Exámenes"] || "";
+          if (vigenciaActual.trim()) {
+            totalSkip++;
+            continue;
+          }
+
+          // Verificar si tiene adjuntos
+          let tieneAdjuntos = false;
+          for (const val of Object.values(record.fields)) {
+            if (Array.isArray(val) && val.length > 0 && val[0]?.url && val[0]?.filename) {
+              tieneAdjuntos = true;
+              break;
+            }
+          }
+          if (!tieneAdjuntos) {
+            totalSkip++;
+            continue;
+          }
+
+          try {
+            const result = await procesarVigenciaRegistro(record);
+            console.log(`   📄 ID:${result.procesoId} → ${result.status} (${result.pdfs || 0} PDFs)`);
+
+            if (result.status === "ok") totalOk++;
+            else totalSkip++;
+          } catch (err) {
+            console.error(`   ❌ Error procesando record ${record.id}: ${err.message}`);
+            totalError++;
+          }
+
+          totalProcesados++;
+
+          if (maxRecords > 0 && totalProcesados >= maxRecords) {
+            console.log(`   🛑 Límite de ${maxRecords} registros alcanzado`);
+            offset = null;
+            break;
+          }
+        }
+
+        if (offset) {
+          console.log(`   ⏳ Pausa de ${delayMs}ms antes del siguiente lote... (procesados: ${totalProcesados})`);
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+      } while (offset);
+
+      console.log(`\n✅ [VIGENCIAS] Procesamiento completado:`);
+      console.log(`   OK: ${totalOk} | Saltados: ${totalSkip} | Errores: ${totalError} | Total: ${totalProcesados}`);
+    } catch (err) {
+      console.error(`\n❌ [VIGENCIAS] Error fatal: ${err.message}`);
+    }
+  })();
+});
+
+/**
+ * GET /procesar-vigencias-test
+ * Procesa UN solo registro para probar que funciona
+ */
+app.get("/procesar-vigencias-test", async (req, res) => {
+  const testId = req.query.id;
+  if (!testId) return res.status(400).json({ error: "Falta ?id=XXXXX" });
+
+  console.log(`\n🧪 [VIGENCIAS-TEST] Probando con ID=${testId}`);
+
+  try {
+    // Buscar el registro por ID de proceso
+    const searchUrl = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?filterByFormula={ID}="${testId}"&maxRecords=1`;
+    const searchRes = await axios.get(searchUrl, {
+      headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+      timeout: 15000,
+    });
+
+    const records = searchRes.data.records || [];
+    if (records.length === 0) {
+      return res.status(404).json({ error: `No se encontró registro con ID=${testId}` });
+    }
+
+    const result = await procesarVigenciaRegistro(records[0]);
+    console.log(`   📄 Resultado: ${JSON.stringify(result)}`);
+    res.json({ ok: true, result });
+  } catch (err) {
+    console.error(`   ❌ Error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Arranque del servidor ───────────────────────────────────────────────────
