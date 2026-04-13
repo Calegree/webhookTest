@@ -2250,7 +2250,7 @@ const VIGENCIA_CONFIG = {
 async function extractTextFromPdfBuffer(pdfBuffer) {
   const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const uint8 = new Uint8Array(pdfBuffer);
-  const doc = await pdfjsLib.getDocument({ data: uint8 }).promise;
+  const doc = await pdfjsLib.getDocument({ data: uint8, verbosity: 0 }).promise;
 
   let fullText = "";
   for (let i = 1; i <= doc.numPages; i++) {
@@ -2259,42 +2259,35 @@ async function extractTextFromPdfBuffer(pdfBuffer) {
     const pageText = content.items.map((item) => item.str).join(" ");
     fullText += pageText + "\n";
   }
-  return fullText;
+  // Limitar a 3000 chars por PDF para no exceder límites de Groq
+  return fullText.substring(0, 3000);
 }
 
 /**
- * Envía texto a Groq para extraer vigencias de exámenes médicos
+ * Envía texto de UN PDF a Groq para extraer vigencia
  */
-async function extractVigenciasWithGroq(textosPdfs) {
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
+async function extractVigenciaUnPdf(groq, textoPdf, filename) {
   const completion = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
     messages: [
       {
         role: "system",
-        content:
-          "Eres un experto en certificados médicos laborales chilenos (ACHS, IST, Mutual). Extraes información de vigencia de exámenes médicos.",
+        content: "Extraes vigencias de certificados médicos chilenos. Responde SOLO con una línea en el formato pedido.",
       },
       {
         role: "user",
-        content: `Analiza los siguientes textos extraídos de certificados médicos. Para CADA certificado, extrae:
-1) Tipo de examen (ej: Evaluación Laboral de Salud - Altitud Geográfica, Psicosensotécnico, Ruido, Sílice, etc.)
-2) Fecha de vigencia o vencimiento
-3) Conclusión (Apto, No Apto, etc.)
-
-Responde SOLO con el listado en este formato exacto, un examen por línea:
+        content: `Del siguiente certificado médico extrae: tipo de examen, fecha de vigencia y conclusión.
+Responde con UNA sola línea en este formato:
 Tipo de examen | Vigencia: DD/MM/YYYY | Conclusión: resultado
 
-Si no encuentras fecha de vigencia, pon "Vigencia: No especificada"
-Si hay múltiples certificados, lista todos.
+Si no hay vigencia, pon "Vigencia: No especificada".
 
-Textos de los certificados:
-${textosPdfs}`,
+Texto del certificado:
+${textoPdf}`,
       },
     ],
     temperature: 0,
-    max_tokens: 2000,
+    max_tokens: 200,
   });
 
   return completion.choices[0].message.content.trim();
@@ -2324,8 +2317,9 @@ async function procesarVigenciaRegistro(record) {
     return { recordId, procesoId, status: "sin_adjuntos" };
   }
 
-  // Descargar y extraer texto de cada PDF
-  let textosCombinados = "";
+  // Descargar, extraer texto y analizar cada PDF por separado
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  let resultados = [];
   let procesados = 0;
 
   for (const att of attachments) {
@@ -2336,10 +2330,18 @@ async function procesarVigenciaRegistro(record) {
         timeout: 30000,
       });
       const texto = await extractTextFromPdfBuffer(Buffer.from(response.data));
-      textosCombinados += `\n--- Documento: ${att.filename} ---\n${texto}\n`;
+
+      // Enviar cada PDF individualmente a Groq
+      const vigencia = await extractVigenciaUnPdf(groq, texto, att.filename);
+      resultados.push(vigencia);
       procesados++;
+
+      // Pausa de 1s entre PDFs para respetar rate limits de Groq
+      if (procesados < attachments.length) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     } catch (err) {
-      console.log(`   ⚠️ Error descargando ${att.filename}: ${err.message}`);
+      console.log(`   ⚠️ Error con ${att.filename}: ${err.message}`);
     }
   }
 
@@ -2347,8 +2349,7 @@ async function procesarVigenciaRegistro(record) {
     return { recordId, procesoId, status: "sin_pdfs_validos" };
   }
 
-  // Enviar a Groq para análisis
-  const vigencias = await extractVigenciasWithGroq(textosCombinados);
+  const vigencias = resultados.join("\n");
 
   // Escribir resultado en Airtable
   await axios.patch(
