@@ -2233,7 +2233,7 @@ app.get("/refresh-retirado-webhooks", async (req, res) => {
 });
 
 // ─── Extracción de Vigencias de Exámenes Médicos (SF-321) ───────────────────
-const Groq = require("groq-sdk");
+// 100% regex, sin IA externa — gratis y sin rate limits
 
 const VIGENCIA_CONFIG = {
   baseId: "appTDqX5xPNm7uUqU",
@@ -2259,53 +2259,108 @@ async function extractTextFromPdfBuffer(pdfBuffer) {
     const pageText = content.items.map((item) => item.str).join(" ");
     fullText += pageText + "\n";
   }
-  // Limitar a 3000 chars por PDF para no exceder límites de Groq
-  return fullText.substring(0, 3000);
+  return fullText;
 }
 
 /**
- * Envía texto de UN PDF a Groq para extraer vigencia
+ * Detecta el tipo de certificado a partir del texto o nombre de archivo
  */
-async function extractVigenciaUnPdf(groq, textoPdf, filename) {
-  const completion = await groq.chat.completions.create({
-    model: "llama-3.3-70b-versatile",
-    messages: [
-      {
-        role: "system",
-        content: "Extraes vigencias de certificados médicos chilenos. Responde SOLO con una línea en el formato pedido.",
-      },
-      {
-        role: "user",
-        content: `Del siguiente certificado médico extrae: tipo de examen, fecha de vigencia y conclusión.
-Responde con UNA sola línea en este formato:
-Tipo de examen | Vigencia: DD/MM/YYYY | Conclusión: resultado
+function detectarTipoCertificado(texto, filename) {
+  const textoLower = texto.toLowerCase();
+  const fileLower = (filename || "").toLowerCase();
 
-Si no hay vigencia, pon "Vigencia: No especificada".
+  // Detectar por título del certificado
+  if (textoLower.includes("psicosensot")) return "Evaluación Psicosensotécnica";
+  if (textoLower.includes("evaluacion laboral de salud") || textoLower.includes("evaluación laboral de salud"))  {
+    // Extraer el riesgo específico - buscar después de "Riesgo" hasta "Conclusión"
+    const riesgoMatch = texto.match(/Vigencia\s+del\s+Informe\s+Riesgo\s+(.+?)(?:\s*Conclusi[oó]n)/is);
+    if (riesgoMatch) {
+      let riesgo = riesgoMatch[1].trim().replace(/\s+/g, " ");
+      if (riesgo.length > 60) riesgo = riesgo.substring(0, 60).trim();
+      return `Evaluación Laboral de Salud - ${riesgo}`;
+    }
+    return "Evaluación Laboral de Salud";
+  }
 
-Texto del certificado:
-${textoPdf}`,
-      },
-    ],
-    temperature: 0,
-    max_tokens: 200,
-  });
+  // Detectar por nombre de archivo (formato ACHS: rut_tipo_folio.pdf)
+  if (fileLower.includes("altitud")) return "Evaluación Laboral de Salud - Altitud Geográfica";
+  if (fileLower.includes("ruido")) return "Evaluación Laboral de Salud - Ruido";
+  if (fileLower.includes("silice") || fileLower.includes("sílice")) return "Evaluación Laboral de Salud - Sílice";
+  if (fileLower.includes("anhidrido") || fileLower.includes("anhídrido")) return "Evaluación Laboral de Salud - Anhídrido Sulfuroso";
+  if (fileLower.includes("psicosensot")) return "Evaluación Psicosensotécnica";
+  if (fileLower.includes("conducc")) return "Evaluación Psicosensotécnica - Conducción";
+  if (fileLower.includes("maquinaria")) return "Evaluación Psicosensotécnica - Maquinaria";
+  if (fileLower.includes("plomo")) return "Evaluación Laboral de Salud - Plomo";
+  if (fileLower.includes("arsenic") || fileLower.includes("arsénic")) return "Evaluación Laboral de Salud - Arsénico";
 
-  return completion.choices[0].message.content.trim();
+  return "Certificado Médico";
 }
 
 /**
- * Procesa un registro: descarga PDFs, extrae texto, analiza con Groq, escribe resultado
+ * Extrae vigencia, conclusión y tipo de un certificado médico usando regex
+ */
+function extraerVigenciaRegex(texto, filename) {
+  const tipo = detectarTipoCertificado(texto, filename);
+
+  // Buscar fecha de vigencia - patrones comunes ACHS
+  let vigencia = null;
+
+  // Patrón 1: "DD/MM/YYYY Vigencia del Informe" (fecha ANTES del label)
+  const p1 = texto.match(/(\d{2}\/\d{2}\/\d{4})\s*Vigencia\s+del\s+Informe/i);
+  if (p1) vigencia = p1[1];
+
+  // Patrón 2: "Vigencia del Informe   DD/MM/YYYY" (fecha DESPUÉS del label)
+  if (!vigencia) {
+    const p2 = texto.match(/Vigencia\s+del\s+Informe\s*:?\s*(\d{2}\/\d{2}\/\d{4})/i);
+    if (p2) vigencia = p2[1];
+  }
+
+  // Patrón 3: "Vigencia   DD/MM/YYYY" (psicosensotécnicos)
+  if (!vigencia) {
+    const p3 = texto.match(/Vigencia\s*:?\s*(\d{2}\/\d{2}\/\d{4})/i);
+    if (p3) vigencia = p3[1];
+  }
+
+  // Patrón 4: Fecha después de "Periodicidad" con cálculo
+  if (!vigencia) {
+    const emision = texto.match(/Fecha\s+de\s+emisi[oó]n\s+del\s+informe\s*:?\s*(\d{2}\/\d{2}\/\d{4})/i);
+    const periodicidad = texto.match(/Periodicidad\s*:?\s*(\d+)\s*a[ñn]o/i);
+    if (emision && periodicidad) {
+      const parts = emision[1].split("/");
+      const fecha = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+      fecha.setFullYear(fecha.getFullYear() + parseInt(periodicidad[1]));
+      vigencia = `${String(fecha.getDate()).padStart(2, "0")}/${String(fecha.getMonth() + 1).padStart(2, "0")}/${fecha.getFullYear()}`;
+    }
+  }
+
+  // Buscar conclusión
+  let conclusion = null;
+  const concMatch = texto.match(/Conclusi[oó]n\s*:?\s*(.+?)(?:\s*Fecha\s+de\s+emisi[oó]n|\s*Periodicidad|\s*Los\s+elementos)/is);
+  if (concMatch) {
+    conclusion = concMatch[1].trim().replace(/\s+/g, " ");
+    // Limpiar conclusión larga
+    if (conclusion.length > 80) conclusion = conclusion.substring(0, 80).trim();
+  }
+
+  return {
+    tipo,
+    vigencia: vigencia || "No especificada",
+    conclusion: conclusion || "No especificada",
+  };
+}
+
+/**
+ * Procesa un registro: descarga PDFs, extrae datos con regex, escribe resultado
  */
 async function procesarVigenciaRegistro(record) {
   const fields = record.fields;
   const recordId = record.id;
   const procesoId = fields.ID || "?";
 
-  // Buscar adjuntos en el campo de informes médicos (por nombre o por fieldId)
+  // Buscar adjuntos en el campo de informes médicos
   let attachments = null;
   for (const [key, val] of Object.entries(fields)) {
     if (Array.isArray(val) && val.length > 0 && val[0].url && val[0].filename) {
-      // Verificar si es el campo correcto comparando con nombres conocidos
       if (key.includes("nformes") && key.includes("dicos")) {
         attachments = val;
         break;
@@ -2317,8 +2372,6 @@ async function procesarVigenciaRegistro(record) {
     return { recordId, procesoId, status: "sin_adjuntos" };
   }
 
-  // Descargar, extraer texto y analizar cada PDF por separado
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   let resultados = [];
   let procesados = 0;
 
@@ -2330,16 +2383,9 @@ async function procesarVigenciaRegistro(record) {
         timeout: 30000,
       });
       const texto = await extractTextFromPdfBuffer(Buffer.from(response.data));
-
-      // Enviar cada PDF individualmente a Groq
-      const vigencia = await extractVigenciaUnPdf(groq, texto, att.filename);
-      resultados.push(vigencia);
+      const datos = extraerVigenciaRegex(texto, att.filename);
+      resultados.push(`${datos.tipo} | Vigencia: ${datos.vigencia} | Conclusión: ${datos.conclusion}`);
       procesados++;
-
-      // Pausa de 1s entre PDFs para respetar rate limits de Groq
-      if (procesados < attachments.length) {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
     } catch (err) {
       console.log(`   ⚠️ Error con ${att.filename}: ${err.message}`);
     }
