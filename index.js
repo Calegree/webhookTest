@@ -1910,7 +1910,7 @@ const BASES_CONFIG = {
     retiradoFieldId: "fldFn9pQBHOS4VQ3F",
     retiradoFieldName: "Retirado",
     triggers: [
-      { field: "Categoría", fieldId: "fldpPpLALxg8RAvLi", values: ["DESISTE", "No Recomendado", "Homologado No Recomendado"] },
+      { field: "Categoría", fieldId: "fldpPpLALxg8RAvLi", values: ["DESISTE"] },
     ],
     watchFieldIds: ["fldpPpLALxg8RAvLi"],
   },
