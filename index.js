@@ -2400,7 +2400,7 @@ async function procesarVigenciaRegistro(record) {
   }
 
   if (procesados === 0) {
-    return { recordId, procesoId, status: "sin_pdfs_validos" };
+    return { recordId, procesoId, status: "sin_pdfs_validos", vigencias: "" };
   }
 
   const vigencias = resultados.join("\n");
@@ -2418,7 +2418,56 @@ async function procesarVigenciaRegistro(record) {
     }
   );
 
-  return { recordId, procesoId, status: "ok", pdfs: procesados };
+  return { recordId, procesoId, status: "ok", pdfs: procesados, vigencias };
+}
+
+/**
+ * ¿La Fecha Examen cae dentro del año de vigencia interno? (+1 año ≥ hoy)
+ */
+function esFechaExamenVigente(fechaExamenISO) {
+  if (!fechaExamenISO) return false;
+  const fecha = new Date(fechaExamenISO);
+  if (isNaN(fecha.getTime())) return false;
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+  const vencimiento = new Date(fecha);
+  vencimiento.setFullYear(vencimiento.getFullYear() + 1);
+  return vencimiento >= hoy;
+}
+
+/**
+ * Reformatea las líneas crudas de "Vigencia Exámenes" (Tipo | Vigencia: X | Conclusión: Y)
+ * al formato final requerido, añadiendo el ID del proceso dueño.
+ */
+function reformatearLineasVigencia(rawText, procesoId) {
+  if (!rawText) return [];
+  return rawText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const partes = line.split("|").map((p) => p.trim());
+      const tipo = partes[0] || "Certificado Médico";
+      const vig = (partes.find((p) => /^Vigencia\s*:/i.test(p)) || "").replace(/^Vigencia\s*:\s*/i, "") || "No especificada";
+      const conc = (partes.find((p) => /^Conclusi[oó]n\s*:/i.test(p)) || "").replace(/^Conclusi[oó]n\s*:\s*/i, "") || "No especificada";
+      return `${tipo} | Vigencia según salud ocupacional: ${vig} | Conclusión: ${conc} | ID del permiso vigente: ${procesoId}`;
+    });
+}
+
+/**
+ * Construye el texto consolidado de exámenes vigentes (propio + previos) bajo la
+ * regla interna: Fecha Examen + 1 año ≥ hoy. Sólo lista los exámenes que están vigentes.
+ */
+function buildVigenciasVigentes(currentOwn, previos) {
+  const lineas = [];
+  if (currentOwn && esFechaExamenVigente(currentOwn.fechaExamen)) {
+    lineas.push(...reformatearLineasVigencia(currentOwn.vigencias, currentOwn.procesoId));
+  }
+  for (const p of previos) {
+    if (!esFechaExamenVigente(p.fechaExamen)) continue;
+    lineas.push(...reformatearLineasVigencia(p.vigencias, p.procesoId));
+  }
+  return lineas.join("\n");
 }
 
 /**
@@ -2519,7 +2568,7 @@ function calcularEstadoVigencia(procesosPrevios) {
 /**
  * Procesa un registro: busca procesos previos por RUT y valida vigencias
  */
-async function procesarProcesosPreviosRegistro(record) {
+async function procesarProcesosPreviosRegistro(record, currentVigenciasOverride = null) {
   const fields = record.fields;
   const recordId = record.id;
   const procesoId = fields[VIGENCIA_CONFIG.idFieldName] || "?";
@@ -2541,13 +2590,25 @@ async function procesarProcesosPreviosRegistro(record) {
     textoPrevios += previos.map((p) => `• ID ${p.procesoId}`).join("\n");
   }
 
-  // Escribir ambos campos
+  // Consolidar Vigencia Exámenes (propio + previos vigentes).
+  // Si procesarVigenciaRegistro corrió recién para este mismo record, nos pasan el texto fresco.
+  const currentOwn = {
+    procesoId,
+    fechaExamen: fields[VIGENCIA_CONFIG.fechaExamenFieldName] || null,
+    vigencias: currentVigenciasOverride != null
+      ? currentVigenciasOverride
+      : (fields[VIGENCIA_CONFIG.vigenciaFieldName] || ""),
+  };
+  const vigenciasConsolidadas = buildVigenciasVigentes(currentOwn, previos);
+
+  // Escribir los 3 campos
   await axios.patch(
     `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}/${recordId}`,
     {
       fields: {
         [VIGENCIA_CONFIG.procesosPreviosFieldName]: textoPrevios,
         [VIGENCIA_CONFIG.tieneVigentesFieldName]: estado,
+        [VIGENCIA_CONFIG.vigenciaFieldName]: vigenciasConsolidadas,
       },
     },
     {
@@ -2890,15 +2951,17 @@ app.post("/webhook/extraer-vigencias", async (req, res) => {
             }
           );
 
-          // Si cambiaron PDFs o es registro nuevo, procesar vigencias
+          // Si cambiaron PDFs o es registro nuevo, procesar vigencias del propio record
+          let vigenciasFrescas = null;
           if (pdfFieldChanged || esRegistroNuevo) {
             const result = await procesarVigenciaRegistro(recordRes.data);
             console.log(`   ✅ Vigencias ID:${result.procesoId} → ${result.status} (${result.pdfs || 0} PDFs)`);
+            vigenciasFrescas = result.vigencias ?? null;
           }
 
-          // Si cambió RUT o es nuevo, procesar búsqueda de procesos previos
-          if (rutFieldChanged || esRegistroNuevo) {
-            const result = await procesarProcesosPreviosRegistro(recordRes.data);
+          // Siempre recalcular procesos previos + consolidado Vigencia Exámenes cuando algo cambió
+          if (rutFieldChanged || esRegistroNuevo || pdfFieldChanged) {
+            const result = await procesarProcesosPreviosRegistro(recordRes.data, vigenciasFrescas);
             console.log(`   ✅ Previos ID:${result.procesoId} → ${result.previos || 0} previos, ${result.estado}`);
           }
         } catch (err) {
