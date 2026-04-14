@@ -1887,7 +1887,7 @@ const SYNC_API_KEY = process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_A
 
 const BASES_CONFIG = {
   documentos: {
-    baseId: "appowVIrRtsBBMKUg",
+    baseId: "appH4ByfDsfJFEp0l",
     tableId: "tblwulQitACgXEdya",
     idField: "ID",
     rutField: "Rut",
@@ -1919,7 +1919,7 @@ const BASES_CONFIG = {
     tableId: "tblbXWtnhMuc54XkO",
     idField: "ID",
     rutField: "Rut",
-    retiradoFieldId: null, // Pendiente: crear campo en producción
+    retiradoFieldId: "fldDyt1HgJRoYgJ8p",
     retiradoFieldName: "Retirado",
     triggers: [
       { field: "Estado", fieldId: "fld0ZPsshHZOtpgLN", values: ["Descarte", "Desiste", "CANCELADO", "No se gestiona"] },
