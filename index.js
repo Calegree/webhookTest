@@ -2968,6 +2968,32 @@ app.get("/setup-vigencias-webhook", async (req, res) => {
 });
 
 /**
+ * GET /delete-vigencias-webhook
+ * Borra el webhook de vigencias (para recrearlo con nueva config)
+ */
+app.get("/delete-vigencias-webhook", async (req, res) => {
+  try {
+    const existing = await axios.get(
+      `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks`,
+      { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 30000 }
+    );
+    const results = [];
+    for (const wh of existing.data.webhooks || []) {
+      if (wh.notificationUrl?.includes("extraer-vigencias")) {
+        await axios.delete(
+          `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks/${wh.id}`,
+          { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+        );
+        results.push({ id: wh.id, status: "deleted" });
+      }
+    }
+    res.json({ webhooks: results });
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+/**
  * GET /refresh-vigencias-webhook
  * Renueva el webhook (deben renovarse cada 7 días)
  */
