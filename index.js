@@ -2238,9 +2238,16 @@ app.get("/refresh-retirado-webhooks", async (req, res) => {
 const VIGENCIA_CONFIG = {
   baseId: "appTDqX5xPNm7uUqU",
   tableId: "tblbXWtnhMuc54XkO",
-  attachmentFieldId: "fldENO6064PkEn8gd", // Informes médicos
-  vigenciaFieldId: "fldj26EkDSGQfBxD7",   // Vigencia Exámenes
+  attachmentFieldId: "fldENO6064PkEn8gd",     // Informes médicos
+  vigenciaFieldId: "fldj26EkDSGQfBxD7",       // Vigencia Exámenes
   vigenciaFieldName: "Vigencia Exámenes",
+  rutFieldId: "fldoxKqbM6zeEmxfF",            // Rut
+  rutFieldName: "Rut",
+  idFieldName: "ID",
+  procesosPreviosFieldId: "fldeASmJ1Ujk08QJR", // Procesos Previos
+  procesosPreviosFieldName: "Procesos Previos",
+  tieneVigentesFieldId: "fldSRqFICCggMGuvY",   // Tiene Exámenes Vigentes
+  tieneVigentesFieldName: "Tiene Exámenes Vigentes",
   apiKey: process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_API_KEY,
 };
 
@@ -2412,6 +2419,244 @@ async function procesarVigenciaRegistro(record) {
 
   return { recordId, procesoId, status: "ok", pdfs: procesados };
 }
+
+/**
+ * Normaliza un RUT eliminando puntos, guiones y espacios
+ */
+function normalizeRutSF321(rut) {
+  return String(rut || "").replace(/[.\-\s]/g, "").toLowerCase().trim();
+}
+
+/**
+ * Parsea fechas tipo DD/MM/YYYY a objeto Date
+ */
+function parseFechaDDMMYYYY(str) {
+  const m = String(str || "").match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!m) return null;
+  return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]));
+}
+
+/**
+ * Busca todos los registros con el mismo RUT (excepto el propio)
+ */
+async function buscarProcesosPreviosPorRut(rut, currentRecordId) {
+  const rutNorm = normalizeRutSF321(rut);
+  if (!rutNorm) return [];
+
+  const records = [];
+  let offset = null;
+
+  // Buscar por múltiples formatos: con puntos, sin puntos, con guión
+  const formatos = [rut, rutNorm];
+  const formula = `OR(${formatos.map((f) => `{${VIGENCIA_CONFIG.rutFieldName}}="${f}"`).join(",")})`;
+
+  do {
+    let url = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?pageSize=100`;
+    url += `&filterByFormula=${encodeURIComponent(formula)}`;
+    url += `&fields%5B%5D=ID&fields%5B%5D=${VIGENCIA_CONFIG.rutFieldId}`;
+    url += `&fields%5B%5D=${VIGENCIA_CONFIG.vigenciaFieldId}`;
+    if (offset) url += `&offset=${encodeURIComponent(offset)}`;
+
+    const res = await axios.get(url, {
+      headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+      timeout: 30000,
+    });
+
+    for (const r of res.data.records || []) {
+      if (r.id === currentRecordId) continue; // excluir el actual
+      const rutRegistro = r.fields[VIGENCIA_CONFIG.rutFieldName];
+      if (normalizeRutSF321(rutRegistro) !== rutNorm) continue; // doble check
+      records.push({
+        recordId: r.id,
+        procesoId: r.fields[VIGENCIA_CONFIG.idFieldName] || "?",
+        rut: rutRegistro,
+        vigencias: r.fields[VIGENCIA_CONFIG.vigenciaFieldName] || "",
+      });
+    }
+    offset = res.data.offset || null;
+  } while (offset);
+
+  return records;
+}
+
+/**
+ * Determina el estado de vigencia comparando las fechas con hoy
+ */
+function calcularEstadoVigencia(procesosPrevios) {
+  if (procesosPrevios.length === 0) return "Sin exámenes previos";
+
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+
+  let tieneAlMenosUnoVigente = false;
+  let tieneAlgunaVigenciaParseada = false;
+
+  for (const proceso of procesosPrevios) {
+    if (!proceso.vigencias) continue;
+    // Buscar todas las fechas DD/MM/YYYY dentro del texto de vigencias
+    const fechas = proceso.vigencias.match(/\d{2}\/\d{2}\/\d{4}/g) || [];
+    for (const f of fechas) {
+      const fecha = parseFechaDDMMYYYY(f);
+      if (!fecha) continue;
+      tieneAlgunaVigenciaParseada = true;
+      if (fecha >= hoy) {
+        tieneAlMenosUnoVigente = true;
+        break;
+      }
+    }
+    if (tieneAlMenosUnoVigente) break;
+  }
+
+  if (tieneAlMenosUnoVigente) return "Sí - Vigentes";
+  if (tieneAlgunaVigenciaParseada) return "No - Vencidos";
+  return "Pendiente revisión"; // hay procesos previos pero sin vigencias extraídas
+}
+
+/**
+ * Procesa un registro: busca procesos previos por RUT y valida vigencias
+ */
+async function procesarProcesosPreviosRegistro(record) {
+  const fields = record.fields;
+  const recordId = record.id;
+  const procesoId = fields[VIGENCIA_CONFIG.idFieldName] || "?";
+  const rut = fields[VIGENCIA_CONFIG.rutFieldName];
+
+  if (!rut) {
+    return { recordId, procesoId, status: "sin_rut" };
+  }
+
+  const previos = await buscarProcesosPreviosPorRut(rut, recordId);
+  const estado = calcularEstadoVigencia(previos);
+
+  // Armar texto de procesos previos
+  let textoPrevios = "";
+  if (previos.length === 0) {
+    textoPrevios = "Sin procesos previos con este RUT.";
+  } else {
+    textoPrevios = `${previos.length} proceso(s) previo(s) con este RUT:\n`;
+    textoPrevios += previos.map((p) => `• ID ${p.procesoId}`).join("\n");
+  }
+
+  // Escribir ambos campos
+  await axios.patch(
+    `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}/${recordId}`,
+    {
+      fields: {
+        [VIGENCIA_CONFIG.procesosPreviosFieldName]: textoPrevios,
+        [VIGENCIA_CONFIG.tieneVigentesFieldName]: estado,
+      },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 15000,
+    }
+  );
+
+  return { recordId, procesoId, rut, previos: previos.length, estado, status: "ok" };
+}
+
+/**
+ * GET /procesar-procesos-previos-test?id=XXXXX
+ * Prueba con un registro específico
+ */
+app.get("/procesar-procesos-previos-test", async (req, res) => {
+  const testId = req.query.id;
+  if (!testId) return res.status(400).json({ error: "Falta ?id=XXXXX" });
+
+  console.log(`\n🧪 [PROCESOS-PREVIOS-TEST] Probando con ID=${testId}`);
+  try {
+    const searchUrl = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?filterByFormula={ID}="${testId}"&maxRecords=1`;
+    const searchRes = await axios.get(searchUrl, {
+      headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+      timeout: 15000,
+    });
+    const records = searchRes.data.records || [];
+    if (records.length === 0) return res.status(404).json({ error: `No se encontró ID=${testId}` });
+
+    const result = await procesarProcesosPreviosRegistro(records[0]);
+    console.log(`   📄 Resultado: ${JSON.stringify(result)}`);
+    res.json({ ok: true, result });
+  } catch (err) {
+    console.error(`   ❌ Error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /procesar-procesos-previos-historicos
+ * Procesa todos los registros existentes
+ */
+app.get("/procesar-procesos-previos-historicos", async (req, res) => {
+  const batchSize = parseInt(req.query.batch) || 50;
+  const delayMs = parseInt(req.query.delay) || 1000;
+  const maxRecords = parseInt(req.query.max) || 0;
+
+  console.log(`\n📋 [PROCESOS-PREVIOS] Iniciando procesamiento histórico`);
+  res.json({ ok: true, message: "Procesamiento iniciado en background" });
+
+  (async () => {
+    let offset = null;
+    let totalProcesados = 0;
+    let totalOk = 0;
+    let totalSkip = 0;
+    let totalError = 0;
+
+    try {
+      do {
+        let url = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?pageSize=${batchSize}`;
+        url += `&fields%5B%5D=ID&fields%5B%5D=${VIGENCIA_CONFIG.rutFieldId}`;
+        url += `&fields%5B%5D=${VIGENCIA_CONFIG.procesosPreviosFieldId}`;
+        if (offset) url += `&offset=${encodeURIComponent(offset)}`;
+
+        const listRes = await axios.get(url, {
+          headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+          timeout: 30000,
+        });
+
+        const records = listRes.data.records || [];
+        offset = listRes.data.offset || null;
+
+        for (const record of records) {
+          // Saltar si ya tiene procesos previos llenos
+          const actual = record.fields[VIGENCIA_CONFIG.procesosPreviosFieldName] || "";
+          if (actual.trim()) {
+            totalSkip++;
+            continue;
+          }
+          if (!record.fields[VIGENCIA_CONFIG.rutFieldName]) {
+            totalSkip++;
+            continue;
+          }
+
+          try {
+            const result = await procesarProcesosPreviosRegistro(record);
+            console.log(`   📄 ID:${result.procesoId} → ${result.previos} previos, ${result.estado}`);
+            if (result.status === "ok") totalOk++;
+            else totalSkip++;
+          } catch (err) {
+            console.error(`   ❌ Error: ${err.message}`);
+            totalError++;
+          }
+
+          totalProcesados++;
+          if (maxRecords > 0 && totalProcesados >= maxRecords) {
+            offset = null;
+            break;
+          }
+        }
+
+        if (offset) await new Promise((r) => setTimeout(r, delayMs));
+      } while (offset);
+
+      console.log(`✅ [PROCESOS-PREVIOS] OK: ${totalOk} | Saltados: ${totalSkip} | Errores: ${totalError}`);
+    } catch (err) {
+      console.error(`❌ Error fatal: ${err.message}`);
+    }
+  })();
+});
 
 /**
  * GET /procesar-vigencias-historicas
@@ -2608,14 +2853,17 @@ app.post("/webhook/extraer-vigencias", async (req, res) => {
       for (const [recordId, changes] of Object.entries(allRecords)) {
         if (processedRecords.has(recordId)) continue;
 
-        // Verificar si cambió el campo de informes médicos
+        // Verificar qué campos cambiaron
         const changedFieldIds = Object.keys(changes.current?.cellValuesByFieldId || {});
         const pdfFieldChanged = changedFieldIds.includes(VIGENCIA_CONFIG.attachmentFieldId);
+        const rutFieldChanged = changedFieldIds.includes(VIGENCIA_CONFIG.rutFieldId);
+        const esRegistroNuevo = !!createdRecords[recordId];
 
-        if (!pdfFieldChanged) continue;
+        // Procesar si cambiaron PDFs, cambió el RUT, o es registro nuevo
+        if (!pdfFieldChanged && !rutFieldChanged && !esRegistroNuevo) continue;
 
         processedRecords.add(recordId);
-        console.log(`   📄 Record ${recordId} → PDFs cambiaron, procesando...`);
+        console.log(`   📄 Record ${recordId} → procesando... (PDFs:${pdfFieldChanged}, RUT:${rutFieldChanged}, nuevo:${esRegistroNuevo})`);
 
         try {
           // Obtener registro completo
@@ -2627,8 +2875,17 @@ app.post("/webhook/extraer-vigencias", async (req, res) => {
             }
           );
 
-          const result = await procesarVigenciaRegistro(recordRes.data);
-          console.log(`   ✅ ID:${result.procesoId} → ${result.status} (${result.pdfs || 0} PDFs)`);
+          // Si cambiaron PDFs o es registro nuevo, procesar vigencias
+          if (pdfFieldChanged || esRegistroNuevo) {
+            const result = await procesarVigenciaRegistro(recordRes.data);
+            console.log(`   ✅ Vigencias ID:${result.procesoId} → ${result.status} (${result.pdfs || 0} PDFs)`);
+          }
+
+          // Si cambió RUT o es nuevo, procesar búsqueda de procesos previos
+          if (rutFieldChanged || esRegistroNuevo) {
+            const result = await procesarProcesosPreviosRegistro(recordRes.data);
+            console.log(`   ✅ Previos ID:${result.procesoId} → ${result.previos || 0} previos, ${result.estado}`);
+          }
         } catch (err) {
           console.error(`   ❌ Error procesando ${recordId}: ${err.message}`);
         }
@@ -2683,7 +2940,7 @@ app.get("/setup-vigencias-webhook", async (req, res) => {
             filters: {
               dataTypes: ["tableData"],
               recordChangeScope: VIGENCIA_CONFIG.tableId,
-              watchDataInFieldIds: [VIGENCIA_CONFIG.attachmentFieldId],
+              watchDataInFieldIds: [VIGENCIA_CONFIG.attachmentFieldId, VIGENCIA_CONFIG.rutFieldId],
             },
           },
         },
