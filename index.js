@@ -2737,8 +2737,94 @@ app.get("/refresh-vigencias-webhook", async (req, res) => {
   }
 });
 
+// ─── Renovación automática de webhooks de Airtable (cada 6 días) ────────────
+/**
+ * Renueva todos los webhooks de Airtable registrados:
+ * - 3 webhooks sync-retirado (Documentos, Psicolaborales, Exámenes Médicos)
+ * - 1 webhook extraer-vigencias (Exámenes Médicos)
+ *
+ * Los webhooks de Airtable expiran a los 7 días, renovamos cada 6 para tener margen.
+ */
+async function renovarTodosLosWebhooks() {
+  console.log("\n🔄 [CRON] Renovando webhooks de Airtable...");
+  const resumen = { retirado: [], vigencias: [], errores: [] };
+
+  // Renovar webhooks sync-retirado en las 3 bases
+  for (const [key, config] of Object.entries(BASES_CONFIG)) {
+    try {
+      const existing = await axios.get(
+        `https://api.airtable.com/v0/bases/${config.baseId}/webhooks`,
+        { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
+      );
+      for (const wh of existing.data.webhooks || []) {
+        if (wh.notificationUrl?.includes("sync-retirado")) {
+          await axios.post(
+            `https://api.airtable.com/v0/bases/${config.baseId}/webhooks/${wh.id}/refresh`,
+            {},
+            { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
+          );
+          resumen.retirado.push(`${key}:${wh.id}`);
+          console.log(`   ✅ sync-retirado renovado en ${key} (${wh.id})`);
+        }
+      }
+    } catch (err) {
+      const msg = `sync-retirado ${key}: ${err.response?.data?.error?.message || err.message}`;
+      resumen.errores.push(msg);
+      console.error(`   ❌ ${msg}`);
+    }
+  }
+
+  // Renovar webhook extraer-vigencias
+  try {
+    const existing = await axios.get(
+      `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks`,
+      { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+    );
+    for (const wh of existing.data.webhooks || []) {
+      if (wh.notificationUrl?.includes("extraer-vigencias")) {
+        await axios.post(
+          `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks/${wh.id}/refresh`,
+          {},
+          { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+        );
+        resumen.vigencias.push(wh.id);
+        console.log(`   ✅ extraer-vigencias renovado (${wh.id})`);
+      }
+    }
+  } catch (err) {
+    const msg = `extraer-vigencias: ${err.response?.data?.error?.message || err.message}`;
+    resumen.errores.push(msg);
+    console.error(`   ❌ ${msg}`);
+  }
+
+  const total = resumen.retirado.length + resumen.vigencias.length;
+  console.log(`🔄 [CRON] Renovación completada: ${total} webhook(s), ${resumen.errores.length} error(es)`);
+  return resumen;
+}
+
+// Endpoint manual para disparar la renovación
+app.get("/refresh-all-webhooks", async (req, res) => {
+  const resumen = await renovarTodosLosWebhooks();
+  res.json(resumen);
+});
+
+// Cron interno: renovar cada 6 días
+const SEIS_DIAS_MS = 6 * 24 * 60 * 60 * 1000;
+setInterval(() => {
+  renovarTodosLosWebhooks().catch((err) =>
+    console.error("❌ [CRON] Error en renovación programada:", err.message)
+  );
+}, SEIS_DIAS_MS);
+
 // ─── Arranque del servidor ───────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`✅ Webhook Transearch listo en http://localhost:${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`✅ Webhook Transearch listo en http://localhost:${PORT}`);
+
+  // Renovar webhooks al arrancar (por si el servidor estuvo caído varios días)
+  setTimeout(() => {
+    renovarTodosLosWebhooks().catch((err) =>
+      console.error("❌ [STARTUP] Error renovando webhooks:", err.message)
+    );
+  }, 10000); // Esperar 10s para que Airtable reconozca el servidor
+});
