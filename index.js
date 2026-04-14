@@ -2575,7 +2575,11 @@ app.get("/procesar-procesos-previos-test", async (req, res) => {
 
   console.log(`\n🧪 [PROCESOS-PREVIOS-TEST] id=${testId} rut=${testRut}`);
   try {
-    const formula = `AND({ID}="${testId}",{${VIGENCIA_CONFIG.rutFieldName}}="${testRut}")`;
+    // Normalizar RUT en ambos lados: quitar puntos, guiones, espacios y pasar a minúscula.
+    // Así captura "17.687.838-k", "17687838-k", "17687838k", "17687838-K", etc.
+    const rutNorm = normalizeRutSF321(testRut);
+    const rutFieldNorm = `LOWER(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE({${VIGENCIA_CONFIG.rutFieldName}},".",""),"-","")," ",""))`;
+    const formula = `AND({ID}="${testId}",${rutFieldNorm}="${rutNorm}")`;
     const searchUrl = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
     const searchRes = await axios.get(searchUrl, {
       headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
