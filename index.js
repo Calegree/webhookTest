@@ -2248,6 +2248,7 @@ const VIGENCIA_CONFIG = {
   procesosPreviosFieldName: "Procesos Previos",
   tieneVigentesFieldId: "fldSRqFICCggMGuvY",   // Tiene Exámenes Vigentes
   tieneVigentesFieldName: "Tiene Exámenes Vigentes",
+  fechaExamenFieldName: "Fecha Examen",        // Date — vigencia = fecha + 1 año (normativa interna)
   apiKey: process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_API_KEY,
 };
 
@@ -2455,6 +2456,7 @@ async function buscarProcesosPreviosPorRut(rut, currentRecordId) {
     url += `&filterByFormula=${encodeURIComponent(formula)}`;
     url += `&fields%5B%5D=ID&fields%5B%5D=${VIGENCIA_CONFIG.rutFieldId}`;
     url += `&fields%5B%5D=${VIGENCIA_CONFIG.vigenciaFieldId}`;
+    url += `&fields%5B%5D=${encodeURIComponent(VIGENCIA_CONFIG.fechaExamenFieldName)}`;
     if (offset) url += `&offset=${encodeURIComponent(offset)}`;
 
     const res = await axios.get(url, {
@@ -2471,6 +2473,7 @@ async function buscarProcesosPreviosPorRut(rut, currentRecordId) {
         procesoId: r.fields[VIGENCIA_CONFIG.idFieldName] || "?",
         rut: rutRegistro,
         vigencias: r.fields[VIGENCIA_CONFIG.vigenciaFieldName] || "",
+        fechaExamen: r.fields[VIGENCIA_CONFIG.fechaExamenFieldName] || null,
       });
     }
     offset = res.data.offset || null;
@@ -2480,7 +2483,9 @@ async function buscarProcesosPreviosPorRut(rut, currentRecordId) {
 }
 
 /**
- * Determina el estado de vigencia comparando las fechas con hoy
+ * Determina el estado de vigencia usando Fecha Examen de procesos previos.
+ * Regla de negocio: los exámenes duran 1 año desde la Fecha Examen registrada,
+ * independiente de lo que diga el PDF (normativa interna de la empresa).
  */
 function calcularEstadoVigencia(procesosPrevios) {
   if (procesosPrevios.length === 0) return "Sin exámenes previos";
@@ -2489,27 +2494,26 @@ function calcularEstadoVigencia(procesosPrevios) {
   hoy.setHours(0, 0, 0, 0);
 
   let tieneAlMenosUnoVigente = false;
-  let tieneAlgunaVigenciaParseada = false;
+  let tieneAlgunaFechaParseada = false;
 
   for (const proceso of procesosPrevios) {
-    if (!proceso.vigencias) continue;
-    // Buscar todas las fechas DD/MM/YYYY dentro del texto de vigencias
-    const fechas = proceso.vigencias.match(/\d{2}\/\d{2}\/\d{4}/g) || [];
-    for (const f of fechas) {
-      const fecha = parseFechaDDMMYYYY(f);
-      if (!fecha) continue;
-      tieneAlgunaVigenciaParseada = true;
-      if (fecha >= hoy) {
-        tieneAlMenosUnoVigente = true;
-        break;
-      }
+    if (!proceso.fechaExamen) continue;
+    // Campo Date de Airtable viene como "YYYY-MM-DD"
+    const fecha = new Date(proceso.fechaExamen);
+    if (isNaN(fecha.getTime())) continue;
+    tieneAlgunaFechaParseada = true;
+
+    const vencimiento = new Date(fecha);
+    vencimiento.setFullYear(vencimiento.getFullYear() + 1);
+    if (vencimiento >= hoy) {
+      tieneAlMenosUnoVigente = true;
+      break;
     }
-    if (tieneAlMenosUnoVigente) break;
   }
 
   if (tieneAlMenosUnoVigente) return "Sí - Vigentes";
-  if (tieneAlgunaVigenciaParseada) return "No - Vencidos";
-  return "Pendiente revisión"; // hay procesos previos pero sin vigencias extraídas
+  if (tieneAlgunaFechaParseada) return "No - Vencidos";
+  return "Pendiente revisión"; // hay procesos previos pero sin Fecha Examen registrada
 }
 
 /**
@@ -2593,6 +2597,7 @@ app.get("/procesar-procesos-previos-historicos", async (req, res) => {
   const batchSize = parseInt(req.query.batch) || 50;
   const delayMs = parseInt(req.query.delay) || 1000;
   const maxRecords = parseInt(req.query.max) || 0;
+  const force = req.query.force === "1" || req.query.force === "true";
 
   console.log(`\n📋 [PROCESOS-PREVIOS] Iniciando procesamiento histórico`);
   res.json({ ok: true, message: "Procesamiento iniciado en background" });
@@ -2620,9 +2625,9 @@ app.get("/procesar-procesos-previos-historicos", async (req, res) => {
         offset = listRes.data.offset || null;
 
         for (const record of records) {
-          // Saltar si ya tiene procesos previos llenos
+          // Saltar si ya tiene procesos previos llenos (salvo force=1)
           const actual = record.fields[VIGENCIA_CONFIG.procesosPreviosFieldName] || "";
-          if (actual.trim()) {
+          if (!force && actual.trim()) {
             totalSkip++;
             continue;
           }
