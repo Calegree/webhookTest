@@ -2659,7 +2659,7 @@ app.get("/setup-vigencias-webhook", async (req, res) => {
     // Verificar si ya existe
     const existing = await axios.get(
       `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks`,
-      { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+      { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 60000 }
     );
     const active = existing.data.webhooks?.find(
       (w) => w.notificationUrl === notificationUrl && !w.isHookExpired
@@ -2693,7 +2693,7 @@ app.get("/setup-vigencias-webhook", async (req, res) => {
           Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}`,
           "Content-Type": "application/json",
         },
-        timeout: 15000,
+        timeout: 60000,
       }
     );
 
