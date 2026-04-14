@@ -2568,21 +2568,56 @@ async function procesarProcesosPreviosRegistro(record) {
  */
 app.get("/procesar-procesos-previos-test", async (req, res) => {
   const testId = req.query.id;
-  if (!testId) return res.status(400).json({ error: "Falta ?id=XXXXX" });
+  const testRut = req.query.rut;
+  const testRecordId = req.query.recordId;
+  if (!testId && !testRut && !testRecordId) {
+    return res.status(400).json({ error: "Falta ?id=XXXXX, ?rut=XXXXX o ?recordId=recXXXX (puedes combinar id+rut para desambiguar)" });
+  }
 
-  console.log(`\n🧪 [PROCESOS-PREVIOS-TEST] Probando con ID=${testId}`);
+  console.log(`\n🧪 [PROCESOS-PREVIOS-TEST] id=${testId || "-"} rut=${testRut || "-"} recordId=${testRecordId || "-"}`);
   try {
-    const searchUrl = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?filterByFormula={ID}="${testId}"&maxRecords=1`;
-    const searchRes = await axios.get(searchUrl, {
-      headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
-      timeout: 15000,
-    });
-    const records = searchRes.data.records || [];
-    if (records.length === 0) return res.status(404).json({ error: `No se encontró ID=${testId}` });
+    let records = [];
+
+    if (testRecordId) {
+      const r = await axios.get(
+        `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}/${testRecordId}`,
+        { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+      );
+      records = [r.data];
+    } else {
+      const filters = [];
+      if (testId) filters.push(`{ID}="${testId}"`);
+      if (testRut) {
+        // Buscar por múltiples formatos (con y sin puntos)
+        const rutNorm = String(testRut).replace(/[.\s]/g, "");
+        const formatos = new Set([testRut, rutNorm]);
+        filters.push(`OR(${[...formatos].map((f) => `{${VIGENCIA_CONFIG.rutFieldName}}="${f}"`).join(",")})`);
+      }
+      const formula = filters.length > 1 ? `AND(${filters.join(",")})` : filters[0];
+      const searchUrl = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=10`;
+      const searchRes = await axios.get(searchUrl, {
+        headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+        timeout: 15000,
+      });
+      records = searchRes.data.records || [];
+    }
+
+    if (records.length === 0) return res.status(404).json({ error: "No se encontró ningún registro con ese filtro" });
+    if (records.length > 1 && !testRecordId) {
+      return res.status(409).json({
+        error: `Filtro ambiguo: ${records.length} registros coinciden. Usa ?recordId=recXXX para apuntar a uno específico.`,
+        candidatos: records.map((r) => ({
+          recordId: r.id,
+          ID: r.fields[VIGENCIA_CONFIG.idFieldName],
+          rut: r.fields[VIGENCIA_CONFIG.rutFieldName],
+          fechaExamen: r.fields[VIGENCIA_CONFIG.fechaExamenFieldName] || null,
+        })),
+      });
+    }
 
     const result = await procesarProcesosPreviosRegistro(records[0]);
     console.log(`   📄 Resultado: ${JSON.stringify(result)}`);
-    res.json({ ok: true, result });
+    res.json({ ok: true, recordId: records[0].id, result });
   } catch (err) {
     console.error(`   ❌ Error: ${err.message}`);
     res.status(500).json({ error: err.message });
