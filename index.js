@@ -2537,6 +2537,206 @@ app.get("/procesar-vigencias-test", async (req, res) => {
   }
 });
 
+// ─── Webhook Airtable para procesar vigencias en tiempo real (SF-321) ───────
+
+/**
+ * POST /webhook/extraer-vigencias
+ * Recibe notificaciones de Airtable cuando hay cambios en "Informes médicos"
+ */
+app.post("/webhook/extraer-vigencias", async (req, res) => {
+  console.log("\n📋 [VIGENCIAS-WEBHOOK] Notificación recibida");
+  res.status(200).json({ ok: true });
+
+  const { base } = req.body || {};
+  if (!base?.id || base.id !== VIGENCIA_CONFIG.baseId) {
+    console.log(`   ⚠️ Base no coincide (recibida: ${base?.id})`);
+    return;
+  }
+
+  try {
+    // Buscar webhook activo
+    const whRes = await axios.get(
+      `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks`,
+      { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+    );
+    const webhook = whRes.data.webhooks?.find((w) =>
+      w.notificationUrl?.includes("extraer-vigencias")
+    );
+    if (!webhook) {
+      console.log("   ⚠️ No se encontró webhook activo");
+      return;
+    }
+
+    // Usar cursor guardado
+    const savedCursor = webhookCursors.get(webhook.id);
+    const payloadsRes = await axios.get(
+      `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks/${webhook.id}/payloads`,
+      {
+        headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+        params: savedCursor ? { cursor: savedCursor } : {},
+        timeout: 15000,
+      }
+    );
+
+    if (payloadsRes.data.cursor) {
+      webhookCursors.set(webhook.id, payloadsRes.data.cursor);
+      saveCursors(webhookCursors);
+    }
+
+    const payloads = payloadsRes.data.payloads || [];
+    console.log(`   📦 ${payloads.length} payload(s) nuevos`);
+
+    // Primer arranque: saltar históricos
+    if (!savedCursor) {
+      console.log("   ⏭️ Primer arranque: cursor guardado, saltando históricos");
+      return;
+    }
+
+    if (payloads.length === 0) return;
+
+    const processedRecords = new Set();
+
+    for (const payload of payloads) {
+      const changedRecords =
+        payload.changedTablesById?.[VIGENCIA_CONFIG.tableId]?.changedRecordsById || {};
+      const createdRecords =
+        payload.changedTablesById?.[VIGENCIA_CONFIG.tableId]?.createdRecordsById || {};
+
+      // Unir cambios y creaciones
+      const allRecords = { ...changedRecords, ...createdRecords };
+
+      for (const [recordId, changes] of Object.entries(allRecords)) {
+        if (processedRecords.has(recordId)) continue;
+
+        // Verificar si cambió el campo de informes médicos
+        const changedFieldIds = Object.keys(changes.current?.cellValuesByFieldId || {});
+        const pdfFieldChanged = changedFieldIds.includes(VIGENCIA_CONFIG.attachmentFieldId);
+
+        if (!pdfFieldChanged) continue;
+
+        processedRecords.add(recordId);
+        console.log(`   📄 Record ${recordId} → PDFs cambiaron, procesando...`);
+
+        try {
+          // Obtener registro completo
+          const recordRes = await axios.get(
+            `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}/${recordId}`,
+            {
+              headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` },
+              timeout: 15000,
+            }
+          );
+
+          const result = await procesarVigenciaRegistro(recordRes.data);
+          console.log(`   ✅ ID:${result.procesoId} → ${result.status} (${result.pdfs || 0} PDFs)`);
+        } catch (err) {
+          console.error(`   ❌ Error procesando ${recordId}: ${err.message}`);
+        }
+      }
+    }
+
+    if (processedRecords.size === 0) {
+      console.log("   ✅ Sin cambios en Informes médicos");
+    } else {
+      console.log(`   ✅ ${processedRecords.size} record(s) procesados`);
+    }
+  } catch (err) {
+    console.error(`   ❌ Error procesando payloads: ${err.response?.data || err.message}`);
+  }
+});
+
+/**
+ * GET /setup-vigencias-webhook
+ * Crea el webhook nativo en Airtable para escuchar cambios en "Informes médicos"
+ */
+app.get("/setup-vigencias-webhook", async (req, res) => {
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+  const notificationUrl = `${baseUrl}/webhook/extraer-vigencias`;
+
+  try {
+    // Verificar si ya existe
+    const existing = await axios.get(
+      `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks`,
+      { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+    );
+    const active = existing.data.webhooks?.find(
+      (w) => w.notificationUrl === notificationUrl && !w.isHookExpired
+    );
+    if (active) {
+      return res.json({
+        status: "already_active",
+        id: active.id,
+        expires: active.expirationTime,
+        notificationUrl,
+      });
+    }
+
+    // Crear webhook nuevo
+    const whRes = await axios.post(
+      `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks`,
+      {
+        notificationUrl,
+        specification: {
+          options: {
+            filters: {
+              dataTypes: ["tableData"],
+              recordChangeScope: VIGENCIA_CONFIG.tableId,
+              watchDataInFieldIds: [VIGENCIA_CONFIG.attachmentFieldId],
+            },
+          },
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 15000,
+      }
+    );
+
+    console.log("🔧 [SETUP VIGENCIAS WEBHOOK]", whRes.data.id);
+    res.json({
+      status: "created",
+      id: whRes.data.id,
+      expires: whRes.data.expirationTime,
+      notificationUrl,
+    });
+  } catch (err) {
+    console.error("❌ Error setup:", err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+/**
+ * GET /refresh-vigencias-webhook
+ * Renueva el webhook (deben renovarse cada 7 días)
+ */
+app.get("/refresh-vigencias-webhook", async (req, res) => {
+  try {
+    const existing = await axios.get(
+      `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks`,
+      { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+    );
+    const results = [];
+    for (const wh of existing.data.webhooks || []) {
+      if (wh.notificationUrl?.includes("extraer-vigencias")) {
+        await axios.post(
+          `https://api.airtable.com/v0/bases/${VIGENCIA_CONFIG.baseId}/webhooks/${wh.id}/refresh`,
+          {},
+          { headers: { Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}` }, timeout: 15000 }
+        );
+        results.push({ id: wh.id, status: "refreshed" });
+      }
+    }
+    res.json({ webhooks: results });
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
+  }
+});
+
 // ─── Arranque del servidor ───────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
