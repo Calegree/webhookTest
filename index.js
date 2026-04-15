@@ -1549,21 +1549,9 @@ async function processPandaDocDocuments(body) {
       console.warn(`   ⚠️ Error validando título: ${err.message}`);
     }
 
-    // Generar portada con tabla de datos + título con logo
-    const coverBytes = await buildCoverPage(vtData);
     const tituloWithLogo = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
-
-    // Combinar portada + título en un solo PDF
-    const vtDoc = await PDFLib.create();
-    const coverPdf = await PDFLib.load(coverBytes);
-    const coverPages = await vtDoc.copyPages(coverPdf, coverPdf.getPageIndices());
-    for (const p of coverPages) vtDoc.addPage(p);
-    const tituloPdf = await PDFLib.load(tituloWithLogo);
-    const tituloPages = await vtDoc.copyPages(tituloPdf, tituloPdf.getPageIndices());
-    for (const p of tituloPages) vtDoc.addPage(p);
-
-    generatedPdfs.push({ filename: `${prefix}VT${suffix}.pdf`, buffer: Buffer.from(await vtDoc.save()) });
-    console.log(`📄 ${prefix}VT${suffix}.pdf generado (portada + título)`);
+    generatedPdfs.push({ filename: `${prefix}VT${suffix}.pdf`, buffer: tituloWithLogo });
+    console.log(`📄 ${prefix}VT${suffix}.pdf generado (solo título)`);
   }
   if (classified.licFront || classified.licBack) {
     const pdf = await generateSinglePageWithLogo([classified.licFront, classified.licBack].filter(Boolean), logoBytes);
