@@ -1582,7 +1582,7 @@ async function processPandaDocDocuments(body) {
       console.warn(`   ⚠️ Error validando HVC: ${err.message}`);
     }
 
-    const hvcLabel = hvcValidado ? `${prefix}HVC VALIDADO${suffix}.pdf` : `${prefix}HVC${suffix}.pdf`;
+    const hvcLabel = `${prefix}HDVC${suffix}.pdf`;
 
     // Generar portada HVC + documento con logo
     const hvcCoverBytes = await buildHvcCoverPage();
