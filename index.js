@@ -1295,23 +1295,6 @@ async function processPandaDocDocuments(body) {
     return;
   }
 
-  // Deduplicar: no procesar el mismo documento dos veces
-  const PROCESSED_DOCS_PATH = path.join(__dirname, ".processed-docs.json");
-  let processedDocs;
-  try {
-    processedDocs = fs.existsSync(PROCESSED_DOCS_PATH)
-      ? new Set(JSON.parse(fs.readFileSync(PROCESSED_DOCS_PATH, "utf8")))
-      : new Set();
-  } catch { processedDocs = new Set(); }
-
-  const dedupKey = `${documentId}_${recipientEmail || ""}`;
-  if (processedDocs.has(dedupKey)) {
-    console.log(`⏭️ Documento ${documentId} ya procesado, ignorando duplicado`);
-    return;
-  }
-  processedDocs.add(dedupKey);
-  try { fs.writeFileSync(PROCESSED_DOCS_PATH, JSON.stringify([...processedDocs])); } catch {}
-
   console.log(`📄 Document ID: ${documentId}`);
   console.log(`📝 Document Name: ${documentName}`);
   console.log(`👤 Recipient Name: ${recipientName || "(no disponible)"}`);
@@ -1745,8 +1728,9 @@ async function processPandaDocDocuments(body) {
     console.log(`  🌐 ${pdf.filename} → /tmp/${pdfId}.pdf`);
   }
 
-  // Obtener attachments existentes para no sobreescribir
-  let existingAttachments = [];
+  // Obtener attachments existentes y filtrar los generados por el webhook (para reemplazarlos)
+  let keepAttachments = [];
+  const webhookPattern = new RegExp(`^${procesoId}\\s*-\\s*(CI|VT|LC|HDVC|HVC|Declaraciones|Otro)`, "i");
   try {
     const recordRes = await axios.get(
       `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
@@ -1754,8 +1738,10 @@ async function processPandaDocDocuments(body) {
     );
     const currentDocs = recordRes.data.fields?.Documentos;
     if (Array.isArray(currentDocs)) {
-      existingAttachments = currentDocs.map((att) => ({ url: att.url }));
-      console.log(`📎 ${existingAttachments.length} docs existentes en Airtable`);
+      keepAttachments = currentDocs
+        .filter((att) => !webhookPattern.test(att.filename || ""))
+        .map((att) => ({ url: att.url }));
+      console.log(`📎 ${currentDocs.length} docs existentes, ${keepAttachments.length} no-webhook conservados, ${currentDocs.length - keepAttachments.length} reemplazados`);
     }
   } catch (err) {
     console.warn(`⚠️ Error obteniendo docs existentes: ${err.message}`);
@@ -1764,7 +1750,7 @@ async function processPandaDocDocuments(body) {
   try {
     await axios.patch(
       `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
-      { fields: { Documentos: [...existingAttachments, ...pdfAttachments] } },
+      { fields: { Documentos: [...keepAttachments, ...pdfAttachments] } },
       {
         headers: {
           Authorization: `Bearer ${airtableApiKey}`,
