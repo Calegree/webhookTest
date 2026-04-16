@@ -1560,7 +1560,12 @@ async function processPandaDocDocuments(body) {
     console.log(`📄 ${prefix}VT${suffix}.pdf generado (solo título)`);
   }
   if (classified.licFront || classified.licBack) {
-    const pdf = await generateSinglePageWithLogo([classified.licFront, classified.licBack].filter(Boolean), logoBytes);
+    const licFiles = [];
+    for (const lic of [classified.licFront, classified.licBack].filter(Boolean)) {
+      const rotated = await autoRotateCarnet(lic.buffer);
+      licFiles.push({ ...lic, buffer: rotated });
+    }
+    const pdf = await generateSinglePageWithLogo(licFiles, logoBytes);
     generatedPdfs.push({ filename: `${prefix}LC${suffix}.pdf`, buffer: pdf });
     console.log(`📄 ${prefix}LC${suffix}.pdf generado`);
   }
