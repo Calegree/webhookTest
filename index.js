@@ -1952,6 +1952,30 @@ async function sendDesistEmail(origenLabel, triggerField, triggerValue, fields, 
   }
 }
 
+// Registro de IDs ya notificados para no enviar email duplicado
+const NOTIFIED_PATH = path.join(__dirname, ".desiste-notified.json");
+
+function loadNotified() {
+  try {
+    if (fs.existsSync(NOTIFIED_PATH)) {
+      return new Set(JSON.parse(fs.readFileSync(NOTIFIED_PATH, "utf8")));
+    }
+  } catch (err) {
+    console.warn("⚠️ Error cargando notificados:", err.message);
+  }
+  return new Set();
+}
+
+function saveNotified(set) {
+  try {
+    fs.writeFileSync(NOTIFIED_PATH, JSON.stringify([...set]));
+  } catch (err) {
+    console.warn("⚠️ Error guardando notificados:", err.message);
+  }
+}
+
+const notifiedIds = loadNotified();
+
 // Almacén de cursors por webhook persistido en disco para sobrevivir reinicios
 const CURSORS_PATH = path.join(__dirname, ".webhook-cursors.json");
 
@@ -2051,11 +2075,22 @@ app.post("/webhook/sync-desiste", async (req, res) => {
 
         if (!origenConfig.triggerValues.includes(valStr)) continue;
 
+        const procesoId = String(fields[origenConfig.idField] || "");
+        if (procesoId && notifiedIds.has(procesoId)) {
+          console.log(`   ⏭️ ID ${procesoId} ya notificado, saltando`);
+          continue;
+        }
+
         console.log(`   📧 Record ${recordId} → ${origenConfig.triggerField}="${valStr}"`);
         await sendDesistEmail(
           origenConfig.label, origenConfig.triggerField, valStr,
           fields, origenConfig.idField, origenConfig.nameField
         );
+
+        if (procesoId) {
+          notifiedIds.add(procesoId);
+          saveNotified(notifiedIds);
+        }
       }
     }
 
