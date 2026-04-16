@@ -1876,113 +1876,78 @@ app.get("/test/pandadoc-details/:documentId", async (req, res) => {
   res.json(results);
 });
 
-// ─── Sync "Retirado" entre 3 bases de Airtable ─────────────────────────────
+// ─── Notificación por email cuando candidato Desiste/Descarte ───────────────
+const nodemailer = require("nodemailer");
 const SYNC_API_KEY = process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_API_KEY;
+const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || "carlos.iturra@valuestrategyconsulting.com";
+
+const smtpTransporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: parseInt(process.env.SMTP_PORT || "587"),
+  secure: false,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
 
 const BASES_CONFIG = {
   documentos: {
     baseId: "appH4ByfDsfJFEp0l",
     tableId: "tblwulQitACgXEdya",
+    triggerField: "Correo de Cierre",
+    triggerValues: ["Descarte Ok Doc", "Desiste", "Desiste OK DOC", "Descarte OK DOC", "Desiste sin DOC", "Descarte sin DOC"],
+    watchFieldIds: ["fldI0SvMeKzynmyTR"],
     idField: "ID",
-    rutField: "Rut",
-    retiradoFieldId: "fld2iqLEBu8Kv4fM9",
-    retiradoFieldName: "Retirado",
-    // Campos que indican retiro
-    triggers: [
-      { field: "Categoría", fieldId: "fldA9ccZcN6IYcAwh", values: ["DESISTE", "DESCARTADO/A"] },
-      { field: "Estado", fieldId: "fldGGIWOrl2XNFRxF", values: ["Cancelado"] },
-      { field: "Correo de Cierre", fieldId: "fldI0SvMeKzynmyTR", contains: ["Desiste", "Descarte"] },
-      { field: "Estado de avance", fieldId: "fld3yAvCeaY2el5Ug", contains: ["Desiste", "Descarte", "ADULTERACION"] },
-    ],
-    watchFieldIds: ["fldA9ccZcN6IYcAwh", "fldGGIWOrl2XNFRxF", "fldI0SvMeKzynmyTR", "fld3yAvCeaY2el5Ug"],
+    nameField: "Nombre y Apellido",
+    label: "Documentos",
   },
   psicolaborales: {
     baseId: "apph3dXyQoZBhK8Zl",
-    tableId: "tblihdKgunXnyXJmZ",
+    tableId: "tblrHggmb2X86XVQl",
+    triggerField: "Desiste",
+    triggerValues: ["Desiste", "Descartado"],
+    watchFieldIds: null,
     idField: "ID",
-    rutField: "RUT",
-    retiradoFieldId: "fldFn9pQBHOS4VQ3F",
-    retiradoFieldName: "Retirado",
-    triggers: [
-      { field: "Categoría", fieldId: "fldpPpLALxg8RAvLi", values: ["DESISTE"] },
-    ],
-    watchFieldIds: ["fldpPpLALxg8RAvLi"],
+    nameField: "Nombre",
+    label: "Psicolaborales (One Page)",
   },
   examenes: {
     baseId: "appTDqX5xPNm7uUqU",
     tableId: "tblbXWtnhMuc54XkO",
+    triggerField: "Etapa",
+    triggerValues: ["Desiste", "Descarte"],
+    watchFieldIds: null,
     idField: "ID",
-    rutField: "Rut",
-    retiradoFieldId: "fldDyt1HgJRoYgJ8p",
-    retiradoFieldName: "Retirado",
-    triggers: [
-      { field: "Estado", fieldId: "fld0ZPsshHZOtpgLN", values: ["Descarte", "Desiste", "CANCELADO", "No se gestiona"] },
-      { field: "Categoría", fieldId: "fldUF5rKa0dx04ntq", values: ["No avanza"] },
-    ],
-    watchFieldIds: ["fld0ZPsshHZOtpgLN", "fldUF5rKa0dx04ntq"],
+    nameField: "Nombre",
+    label: "Exámenes Médicos",
   },
 };
 
-function normalizeRut(rut) {
-  if (!rut) return "";
-  return String(rut).replace(/[.\-\s]/g, "").toLowerCase().trim();
-}
-
-function isRetiradoTriggered(fields, triggers) {
-  for (const t of triggers) {
-    const val = fields[t.field];
-    if (!val) continue;
-    const valStr = Array.isArray(val) ? val.join(", ") : String(val);
-    if (t.values && t.values.includes(valStr)) return true;
-    if (t.contains && t.contains.some((kw) => valStr.includes(kw))) return true;
-  }
-  return false;
-}
-
-// Buscar y marcar "Retirado" en una base por ID + RUT
-async function markRetiradoInBase(config, procesoId, rut) {
-  if (!config.retiradoFieldId) {
-    console.log(`   ⏭️ ${config.baseId}: sin campo Retirado configurado`);
-    return;
-  }
-  const normalRut = normalizeRut(rut);
+async function sendDesistEmail(origenLabel, triggerField, triggerValue, fields, idField, nameField) {
+  const procesoId = fields[idField] || "(sin ID)";
+  const nombre = fields[nameField] || "(sin nombre)";
+  const subject = `[Desiste/Descarte] ID ${procesoId} - ${nombre} (${origenLabel})`;
+  const html = `
+    <h3>Notificación de Desiste/Descarte</h3>
+    <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
+      <tr><td><b>Base origen</b></td><td>${origenLabel}</td></tr>
+      <tr><td><b>Campo</b></td><td>${triggerField}</td></tr>
+      <tr><td><b>Valor</b></td><td>${triggerValue}</td></tr>
+      <tr><td><b>ID Proceso</b></td><td>${procesoId}</td></tr>
+      <tr><td><b>Candidato</b></td><td>${nombre}</td></tr>
+    </table>
+  `;
   try {
-    // Buscar por ID
-    const searchRes = await axios.get(
-      `https://api.airtable.com/v0/${config.baseId}/${config.tableId}`,
-      {
-        headers: { Authorization: `Bearer ${SYNC_API_KEY}` },
-        params: {
-          filterByFormula: `{${config.idField}} = "${procesoId}"`,
-          maxRecords: 10,
-        },
-        timeout: 15000,
-      }
-    );
-    for (const record of searchRes.data.records) {
-      const rawRut = record.fields[config.rutField];
-      const recordRut = normalizeRut(rawRut);
-      console.log(`   🔎 Comparando RUT: original="${rawRut}" → normalizado="${recordRut}" vs buscado="${normalRut}" (original: "${rut}")`);
-      // Solo marcar si el RUT coincide exactamente (evita marcar otra persona con mismo ID)
-      if (!normalRut || !recordRut || recordRut !== normalRut) {
-        console.log(`   ⏭️ RUT no coincide, saltando record=${record.id}`);
-        continue;
-      }
-
-      if (record.fields[config.retiradoFieldName]) continue; // Ya marcado
-
-      await axios.patch(
-        `https://api.airtable.com/v0/${config.baseId}/${config.tableId}/${record.id}`,
-        { fields: { [config.retiradoFieldName]: true } },
-        {
-          headers: { Authorization: `Bearer ${SYNC_API_KEY}`, "Content-Type": "application/json" },
-          timeout: 15000,
-        }
-      );
-      console.log(`   ✅ Marcado Retirado en ${config.baseId} record=${record.id}`);
-    }
+    await smtpTransporter.sendMail({
+      from: process.env.SMTP_USER,
+      to: NOTIFICATION_EMAIL,
+      subject,
+      html,
+    });
+    console.log(`   📧 Email enviado a ${NOTIFICATION_EMAIL}`);
   } catch (err) {
-    console.error(`   ❌ Error marcando en ${config.baseId}: ${err.response?.data?.error?.message || err.message}`);
+    console.error(`   ❌ Error enviando email: ${err.message}`);
   }
 }
 
@@ -2010,9 +1975,8 @@ function saveCursors(cursors) {
 
 const webhookCursors = loadCursors();
 
-// Endpoint que recibe notificaciones de Airtable Webhook
-app.post("/webhook/sync-retirado", async (req, res) => {
-  console.log("\n🔴 [SYNC-RETIRADO] Notificación recibida");
+app.post("/webhook/sync-desiste", async (req, res) => {
+  console.log("\n📧 [SYNC-DESISTE] Notificación recibida");
   res.status(200).json({ ok: true });
 
   const { base } = req.body || {};
@@ -2021,29 +1985,25 @@ app.post("/webhook/sync-retirado", async (req, res) => {
     return;
   }
 
-  // Identificar qué base envió la notificación
   const origen = Object.entries(BASES_CONFIG).find(([, c]) => c.baseId === base.id);
   if (!origen) {
     console.log(`   ⚠️ Base ${base.id} no configurada`);
     return;
   }
   const [origenKey, origenConfig] = origen;
-  console.log(`   📍 Origen: ${origenKey}`);
+  console.log(`   📍 Origen: ${origenKey} (${origenConfig.label})`);
 
-  // Obtener payloads del webhook
   try {
-    // Buscar el webhook activo para esta base
     const whRes = await axios.get(
       `https://api.airtable.com/v0/bases/${base.id}/webhooks`,
       { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
     );
-    const webhook = whRes.data.webhooks?.find((w) => w.notificationUrl?.includes("sync-retirado"));
+    const webhook = whRes.data.webhooks?.find((w) => w.notificationUrl?.includes("sync-desiste"));
     if (!webhook) {
       console.log("   ⚠️ No se encontró webhook activo");
       return;
     }
 
-    // Usar cursor guardado para solo obtener payloads NUEVOS
     const savedCursor = webhookCursors.get(webhook.id);
     const payloadsRes = await axios.get(
       `https://api.airtable.com/v0/bases/${base.id}/webhooks/${webhook.id}/payloads`,
@@ -2054,111 +2014,67 @@ app.post("/webhook/sync-retirado", async (req, res) => {
       }
     );
 
-    // Guardar nuevo cursor para la próxima vez
     if (payloadsRes.data.cursor) {
       webhookCursors.set(webhook.id, payloadsRes.data.cursor);
       saveCursors(webhookCursors);
     }
 
     const payloads = payloadsRes.data.payloads || [];
-    console.log(`   📦 ${payloads.length} payload(s) nuevos (cursor: ${savedCursor || "inicio"} → ${payloadsRes.data.cursor})`);
+    console.log(`   📦 ${payloads.length} payload(s) nuevos`);
 
-    // Si no había cursor guardado, es el primer arranque: solo guardar cursor, no procesar históricos
     if (!savedCursor) {
-      console.log("   ⏭️ Primer arranque: saltando payloads históricos, guardando cursor para futuros eventos");
+      console.log("   ⏭️ Primer arranque: guardando cursor, saltando históricos");
       return;
     }
-
     if (payloads.length === 0) return;
 
-    // Deduplicar: solo procesar cada record UNA vez por batch
     const processedRecords = new Set();
 
     for (const payload of payloads) {
-      const changedRecords = payload.changedTablesById?.[origenConfig.tableId]?.changedRecordsById || {};
+      const changedRecords =
+        payload.changedTablesById?.[origenConfig.tableId]?.changedRecordsById || {};
 
-      for (const [recordId, changes] of Object.entries(changedRecords)) {
-        // Skip si ya procesamos este record en este batch
+      for (const recordId of Object.keys(changedRecords)) {
         if (processedRecords.has(recordId)) continue;
-
-        const changedFields = changes.current?.cellValuesByFieldId || {};
-
-        // Verificar si algún campo trigger cambió a valor de retiro
-        let triggered = false;
-        for (const trigger of origenConfig.triggers) {
-          const newVal = changedFields[trigger.fieldId];
-          if (newVal === undefined) continue;
-          const valStr = newVal?.name || (Array.isArray(newVal) ? newVal.map((v) => v.name || v).join(", ") : String(newVal || ""));
-          if (trigger.values && trigger.values.includes(valStr)) triggered = true;
-          if (trigger.contains && trigger.contains.some((kw) => valStr.includes(kw))) triggered = true;
-        }
-
-        if (!triggered) continue;
-
         processedRecords.add(recordId);
-        console.log(`   🔴 Record ${recordId} → RETIRADO detectado`);
 
-        // Obtener ID y RUT del record
         const recordRes = await axios.get(
           `https://api.airtable.com/v0/${origenConfig.baseId}/${origenConfig.tableId}/${recordId}`,
           { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
         );
         const fields = recordRes.data.fields;
-        const procesoId = fields[origenConfig.idField];
-        const rut = fields[origenConfig.rutField];
+        const triggerValue = fields[origenConfig.triggerField];
+        const valStr = Array.isArray(triggerValue)
+          ? triggerValue.map((v) => v?.name || v).join(", ")
+          : (triggerValue?.name || String(triggerValue || ""));
 
-        if (!procesoId) {
-          console.log(`   ⚠️ Record sin ID, saltando`);
-          continue;
-        }
-        if (!rut) {
-          console.log(`   ⚠️ Record sin RUT, saltando (se requiere RUT para sync preciso)`);
-          continue;
-        }
-        console.log(`   📋 ID=${procesoId}, RUT=${rut}`);
+        if (!origenConfig.triggerValues.includes(valStr)) continue;
 
-        // Marcar Retirado en TODAS las bases (incluyendo la de origen)
-        for (const [key, config] of Object.entries(BASES_CONFIG)) {
-          console.log(`   🔄 Sincronizando → ${key}...`);
-          await markRetiradoInBase(config, procesoId, rut);
-        }
+        console.log(`   📧 Record ${recordId} → ${origenConfig.triggerField}="${valStr}"`);
+        await sendDesistEmail(
+          origenConfig.label, origenConfig.triggerField, valStr,
+          fields, origenConfig.idField, origenConfig.nameField
+        );
       }
     }
 
     if (processedRecords.size === 0) {
-      console.log("   ✅ Sin cambios de retiro en este batch");
-    } else {
-      console.log(`   ✅ ${processedRecords.size} record(s) procesados`);
+      console.log("   ✅ Sin cambios de desiste en este batch");
     }
   } catch (err) {
     console.error(`   ❌ Error procesando payloads: ${err.response?.data || err.message}`);
   }
 });
 
-// Endpoint manual para marcar Retirado por ID + RUT en todas las bases
-app.post("/webhook/marcar-retirado", async (req, res) => {
-  const { id, rut } = req.body;
-  if (!id) return res.status(400).json({ error: "Falta campo: id" });
-
-  console.log(`\n🔴 [MARCAR-RETIRADO] Manual: ID=${id}, RUT=${rut}`);
-  for (const [key, config] of Object.entries(BASES_CONFIG)) {
-    console.log(`   🔄 → ${key}...`);
-    await markRetiradoInBase(config, id, rut);
-  }
-  res.json({ ok: true, message: `Retirado marcado para ID=${id}` });
-});
-
-// ─── Configurar webhooks nativos de Airtable ────────────────────────────────
-app.get("/setup-retirado-webhooks", async (req, res) => {
+app.get("/setup-desiste-webhooks", async (req, res) => {
   const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
     ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
     : process.env.PUBLIC_URL || `http://localhost:${PORT}`;
-  const notificationUrl = `${baseUrl}/webhook/sync-retirado`;
+  const notificationUrl = `${baseUrl}/webhook/sync-desiste`;
 
   const results = {};
   for (const [key, config] of Object.entries(BASES_CONFIG)) {
     try {
-      // Verificar si ya existe un webhook
       const existing = await axios.get(
         `https://api.airtable.com/v0/bases/${config.baseId}/webhooks`,
         { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
@@ -2171,21 +2087,12 @@ app.get("/setup-retirado-webhooks", async (req, res) => {
         continue;
       }
 
-      // Crear webhook nuevo
+      const filters = { dataTypes: ["tableData"], recordChangeScope: config.tableId };
+      if (config.watchFieldIds) filters.watchDataInFieldIds = config.watchFieldIds;
+
       const whRes = await axios.post(
         `https://api.airtable.com/v0/bases/${config.baseId}/webhooks`,
-        {
-          notificationUrl,
-          specification: {
-            options: {
-              filters: {
-                dataTypes: ["tableData"],
-                recordChangeScope: config.tableId,
-                watchDataInFieldIds: config.watchFieldIds,
-              },
-            },
-          },
-        },
+        { notificationUrl, specification: { options: { filters } } },
         {
           headers: { Authorization: `Bearer ${SYNC_API_KEY}`, "Content-Type": "application/json" },
           timeout: 15000,
@@ -2196,12 +2103,11 @@ app.get("/setup-retirado-webhooks", async (req, res) => {
       results[key] = { status: "error", message: err.response?.data?.error?.message || err.message };
     }
   }
-  console.log("🔧 [SETUP WEBHOOKS]", JSON.stringify(results, null, 2));
+  console.log("🔧 [SETUP DESISTE WEBHOOKS]", JSON.stringify(results, null, 2));
   res.json({ notificationUrl, webhooks: results });
 });
 
-// Renovar webhooks (deben renovarse cada 7 días)
-app.get("/refresh-retirado-webhooks", async (req, res) => {
+app.get("/refresh-desiste-webhooks", async (req, res) => {
   const results = {};
   for (const [key, config] of Object.entries(BASES_CONFIG)) {
     try {
@@ -2210,7 +2116,7 @@ app.get("/refresh-retirado-webhooks", async (req, res) => {
         { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
       );
       for (const wh of existing.data.webhooks || []) {
-        if (wh.notificationUrl?.includes("sync-retirado")) {
+        if (wh.notificationUrl?.includes("sync-desiste")) {
           await axios.post(
             `https://api.airtable.com/v0/bases/${config.baseId}/webhooks/${wh.id}/refresh`,
             {},
@@ -3095,16 +3001,16 @@ app.get("/refresh-vigencias-webhook", async (req, res) => {
 // ─── Renovación automática de webhooks de Airtable (cada 6 días) ────────────
 /**
  * Renueva todos los webhooks de Airtable registrados:
- * - 3 webhooks sync-retirado (Documentos, Psicolaborales, Exámenes Médicos)
+ * - 3 webhooks sync-desiste (Documentos, Psicolaborales, Exámenes Médicos)
  * - 1 webhook extraer-vigencias (Exámenes Médicos)
  *
  * Los webhooks de Airtable expiran a los 7 días, renovamos cada 6 para tener margen.
  */
 async function renovarTodosLosWebhooks() {
   console.log("\n🔄 [CRON] Renovando webhooks de Airtable...");
-  const resumen = { retirado: [], vigencias: [], errores: [] };
+  const resumen = { desiste: [], vigencias: [], errores: [] };
 
-  // Renovar webhooks sync-retirado en las 3 bases
+  // Renovar webhooks sync-desiste en las 3 bases
   for (const [key, config] of Object.entries(BASES_CONFIG)) {
     try {
       const existing = await axios.get(
@@ -3112,18 +3018,18 @@ async function renovarTodosLosWebhooks() {
         { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
       );
       for (const wh of existing.data.webhooks || []) {
-        if (wh.notificationUrl?.includes("sync-retirado")) {
+        if (wh.notificationUrl?.includes("sync-desiste")) {
           await axios.post(
             `https://api.airtable.com/v0/bases/${config.baseId}/webhooks/${wh.id}/refresh`,
             {},
             { headers: { Authorization: `Bearer ${SYNC_API_KEY}` }, timeout: 15000 }
           );
-          resumen.retirado.push(`${key}:${wh.id}`);
-          console.log(`   ✅ sync-retirado renovado en ${key} (${wh.id})`);
+          resumen.desiste.push(`${key}:${wh.id}`);
+          console.log(`   ✅ sync-desiste renovado en ${key} (${wh.id})`);
         }
       }
     } catch (err) {
-      const msg = `sync-retirado ${key}: ${err.response?.data?.error?.message || err.message}`;
+      const msg = `sync-desiste ${key}: ${err.response?.data?.error?.message || err.message}`;
       resumen.errores.push(msg);
       console.error(`   ❌ ${msg}`);
     }
@@ -3152,7 +3058,7 @@ async function renovarTodosLosWebhooks() {
     console.error(`   ❌ ${msg}`);
   }
 
-  const total = resumen.retirado.length + resumen.vigencias.length;
+  const total = resumen.desiste.length + resumen.vigencias.length;
   console.log(`🔄 [CRON] Renovación completada: ${total} webhook(s), ${resumen.errores.length} error(es)`);
   return resumen;
 }
