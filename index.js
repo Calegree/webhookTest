@@ -1555,7 +1555,8 @@ async function processPandaDocDocuments(body) {
       console.warn(`   ⚠️ Error validando título: ${err.message}`);
     }
 
-    const tituloWithLogo = await generateCombinedPdfWithLogo([classified.titulo], logoBytes);
+    const tituloRotated = await autoRotateCarnet(classified.titulo.buffer);
+    const tituloWithLogo = await generateCombinedPdfWithLogo([{ ...classified.titulo, buffer: tituloRotated }], logoBytes);
     generatedPdfs.push({ filename: `${prefix}VT${suffix}.pdf`, buffer: tituloWithLogo });
     console.log(`📄 ${prefix}VT${suffix}.pdf generado (solo título)`);
   }
