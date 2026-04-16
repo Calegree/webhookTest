@@ -1295,6 +1295,23 @@ async function processPandaDocDocuments(body) {
     return;
   }
 
+  // Deduplicar: no procesar el mismo documento dos veces
+  const PROCESSED_DOCS_PATH = path.join(__dirname, ".processed-docs.json");
+  let processedDocs;
+  try {
+    processedDocs = fs.existsSync(PROCESSED_DOCS_PATH)
+      ? new Set(JSON.parse(fs.readFileSync(PROCESSED_DOCS_PATH, "utf8")))
+      : new Set();
+  } catch { processedDocs = new Set(); }
+
+  const dedupKey = `${documentId}_${recipientEmail || ""}`;
+  if (processedDocs.has(dedupKey)) {
+    console.log(`⏭️ Documento ${documentId} ya procesado, ignorando duplicado`);
+    return;
+  }
+  processedDocs.add(dedupKey);
+  try { fs.writeFileSync(PROCESSED_DOCS_PATH, JSON.stringify([...processedDocs])); } catch {}
+
   console.log(`📄 Document ID: ${documentId}`);
   console.log(`📝 Document Name: ${documentName}`);
   console.log(`👤 Recipient Name: ${recipientName || "(no disponible)"}`);
