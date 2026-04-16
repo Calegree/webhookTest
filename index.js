@@ -910,6 +910,7 @@ app.get("/test/validate-hvc/:nombre", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const { extractTituloData } = require("./lib/titulo-extractor");
 const { validarTitulo } = require("./lib/titulo-validators");
+const { autoRotateCarnet } = require("./lib/auto-rotate");
 const { listarUniversidades } = require("./lib/universidades");
 
 const TEST_TITULOS = {
@@ -1523,7 +1524,12 @@ async function processPandaDocDocuments(body) {
   const suffix = ` - ${nombreCompleto}`;
 
   if (classified.ciFront || classified.ciBack) {
-    const pdf = await generateSinglePageWithLogo([classified.ciFront, classified.ciBack].filter(Boolean), logoBytes);
+    const ciFiles = [];
+    for (const ci of [classified.ciFront, classified.ciBack].filter(Boolean)) {
+      const rotated = await autoRotateCarnet(ci.buffer);
+      ciFiles.push({ ...ci, buffer: rotated });
+    }
+    const pdf = await generateSinglePageWithLogo(ciFiles, logoBytes);
     generatedPdfs.push({ filename: `${prefix}CI${suffix}.pdf`, buffer: pdf });
     console.log(`📄 ${prefix}CI${suffix}.pdf generado`);
   }
