@@ -2175,13 +2175,9 @@ const VIGENCIA_CONFIG = {
   baseId: "appTDqX5xPNm7uUqU",
   tableId: "tblbXWtnhMuc54XkO",
   attachmentFieldId: "fldENO6064PkEn8gd",     // Informes médicos
-  vigenciaFieldId: "fldj26EkDSGQfBxD7",       // Vigencia Exámenes
-  vigenciaFieldName: "Vigencia Exámenes",
   rutFieldId: "fldoxKqbM6zeEmxfF",            // Rut
   rutFieldName: "Rut",
   idFieldName: "ID",
-  procesosPreviosFieldId: "fldeASmJ1Ujk08QJR", // Procesos Previos
-  procesosPreviosFieldName: "Procesos Previos",
   tieneVigentesFieldId: "fldSRqFICCggMGuvY",   // Tiene Exámenes Vigentes
   tieneVigentesFieldName: "Tiene Exámenes Vigentes",
   fechaExamenFieldName: "Fecha Examen",        // Date — vigencia = fecha + 1 año (normativa interna)
@@ -2340,20 +2336,6 @@ async function procesarVigenciaRegistro(record) {
   }
 
   const vigencias = resultados.join("\n");
-
-  // Escribir resultado en Airtable
-  await axios.patch(
-    `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}/${recordId}`,
-    { fields: { [VIGENCIA_CONFIG.vigenciaFieldName]: vigencias } },
-    {
-      headers: {
-        Authorization: `Bearer ${VIGENCIA_CONFIG.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 15000,
-    }
-  );
-
   return { recordId, procesoId, status: "ok", pdfs: procesados, vigencias };
 }
 
@@ -2369,41 +2351,6 @@ function esFechaExamenVigente(fechaExamenISO) {
   const vencimiento = new Date(fecha);
   vencimiento.setFullYear(vencimiento.getFullYear() + 1);
   return vencimiento >= hoy;
-}
-
-/**
- * Reformatea las líneas crudas de "Vigencia Exámenes" (Tipo | Vigencia: X | Conclusión: Y)
- * al formato final requerido, añadiendo el ID del proceso dueño.
- */
-function reformatearLineasVigencia(rawText, procesoId) {
-  if (!rawText) return [];
-  return rawText
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const partes = line.split("|").map((p) => p.trim());
-      const tipo = partes[0] || "Certificado Médico";
-      const vig = (partes.find((p) => /^Vigencia\s*:/i.test(p)) || "").replace(/^Vigencia\s*:\s*/i, "") || "No especificada";
-      const conc = (partes.find((p) => /^Conclusi[oó]n\s*:/i.test(p)) || "").replace(/^Conclusi[oó]n\s*:\s*/i, "") || "No especificada";
-      return `${tipo} | Vigencia según salud ocupacional: ${vig} | Conclusión: ${conc} | ID del permiso vigente: ${procesoId}`;
-    });
-}
-
-/**
- * Construye el texto consolidado de exámenes vigentes (propio + previos) bajo la
- * regla interna: Fecha Examen + 1 año ≥ hoy. Sólo lista los exámenes que están vigentes.
- */
-function buildVigenciasVigentes(currentOwn, previos) {
-  const lineas = [];
-  if (currentOwn && esFechaExamenVigente(currentOwn.fechaExamen)) {
-    lineas.push(...reformatearLineasVigencia(currentOwn.vigencias, currentOwn.procesoId));
-  }
-  for (const p of previos) {
-    if (!esFechaExamenVigente(p.fechaExamen)) continue;
-    lineas.push(...reformatearLineasVigencia(p.vigencias, p.procesoId));
-  }
-  return lineas.join("\n");
 }
 
 /**
@@ -2440,7 +2387,6 @@ async function buscarProcesosPreviosPorRut(rut, currentRecordId) {
     let url = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?pageSize=100`;
     url += `&filterByFormula=${encodeURIComponent(formula)}`;
     url += `&fields%5B%5D=ID&fields%5B%5D=${VIGENCIA_CONFIG.rutFieldId}`;
-    url += `&fields%5B%5D=${VIGENCIA_CONFIG.vigenciaFieldId}`;
     url += `&fields%5B%5D=${encodeURIComponent(VIGENCIA_CONFIG.fechaExamenFieldName)}`;
     if (offset) url += `&offset=${encodeURIComponent(offset)}`;
 
@@ -2457,7 +2403,6 @@ async function buscarProcesosPreviosPorRut(rut, currentRecordId) {
         recordId: r.id,
         procesoId: r.fields[VIGENCIA_CONFIG.idFieldName] || "?",
         rut: rutRegistro,
-        vigencias: r.fields[VIGENCIA_CONFIG.vigenciaFieldName] || "",
         fechaExamen: r.fields[VIGENCIA_CONFIG.fechaExamenFieldName] || null,
       });
     }
@@ -2504,7 +2449,7 @@ function calcularEstadoVigencia(procesosPrevios) {
 /**
  * Procesa un registro: busca procesos previos por RUT y valida vigencias
  */
-async function procesarProcesosPreviosRegistro(record, currentVigenciasOverride = null) {
+async function procesarProcesosPreviosRegistro(record) {
   const fields = record.fields;
   const recordId = record.id;
   const procesoId = fields[VIGENCIA_CONFIG.idFieldName] || "?";
@@ -2517,34 +2462,11 @@ async function procesarProcesosPreviosRegistro(record, currentVigenciasOverride 
   const previos = await buscarProcesosPreviosPorRut(rut, recordId);
   const estado = calcularEstadoVigencia(previos);
 
-  // Armar texto de procesos previos
-  let textoPrevios = "";
-  if (previos.length === 0) {
-    textoPrevios = "Sin procesos previos con este RUT.";
-  } else {
-    textoPrevios = `${previos.length} proceso(s) previo(s) con este RUT:\n`;
-    textoPrevios += previos.map((p) => `• ID ${p.procesoId}`).join("\n");
-  }
-
-  // Consolidar Vigencia Exámenes (propio + previos vigentes).
-  // Si procesarVigenciaRegistro corrió recién para este mismo record, nos pasan el texto fresco.
-  const currentOwn = {
-    procesoId,
-    fechaExamen: fields[VIGENCIA_CONFIG.fechaExamenFieldName] || null,
-    vigencias: currentVigenciasOverride != null
-      ? currentVigenciasOverride
-      : (fields[VIGENCIA_CONFIG.vigenciaFieldName] || ""),
-  };
-  const vigenciasConsolidadas = buildVigenciasVigentes(currentOwn, previos);
-
-  // Escribir los 3 campos
   await axios.patch(
     `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}/${recordId}`,
     {
       fields: {
-        [VIGENCIA_CONFIG.procesosPreviosFieldName]: textoPrevios,
         [VIGENCIA_CONFIG.tieneVigentesFieldName]: estado,
-        [VIGENCIA_CONFIG.vigenciaFieldName]: vigenciasConsolidadas,
       },
     },
     {
@@ -2620,7 +2542,7 @@ app.get("/procesar-procesos-previos-historicos", async (req, res) => {
       do {
         let url = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?pageSize=${batchSize}`;
         url += `&fields%5B%5D=ID&fields%5B%5D=${VIGENCIA_CONFIG.rutFieldId}`;
-        url += `&fields%5B%5D=${VIGENCIA_CONFIG.procesosPreviosFieldId}`;
+        url += `&fields%5B%5D=${VIGENCIA_CONFIG.tieneVigentesFieldId}`;
         if (offset) url += `&offset=${encodeURIComponent(offset)}`;
 
         const listRes = await axios.get(url, {
@@ -2632,9 +2554,7 @@ app.get("/procesar-procesos-previos-historicos", async (req, res) => {
         offset = listRes.data.offset || null;
 
         for (const record of records) {
-          // Saltar si ya tiene procesos previos llenos (salvo force=1)
-          const actual = record.fields[VIGENCIA_CONFIG.procesosPreviosFieldName] || "";
-          if (!force && actual.trim()) {
+          if (!force && record.fields[VIGENCIA_CONFIG.tieneVigentesFieldName]) {
             totalSkip++;
             continue;
           }
@@ -2696,7 +2616,6 @@ app.get("/procesar-vigencias-historicas", async (req, res) => {
         let url = `https://api.airtable.com/v0/${VIGENCIA_CONFIG.baseId}/${VIGENCIA_CONFIG.tableId}?pageSize=${batchSize}`;
         url += `&fields%5B%5D=ID`;
         url += `&fields%5B%5D=${VIGENCIA_CONFIG.attachmentFieldId}`;
-        url += `&fields%5B%5D=${VIGENCIA_CONFIG.vigenciaFieldId}`;
         if (offset) url += `&offset=${encodeURIComponent(offset)}`;
 
         const listRes = await axios.get(url, {
@@ -2709,12 +2628,6 @@ app.get("/procesar-vigencias-historicas", async (req, res) => {
 
         for (const record of records) {
           // Saltar si ya tiene vigencia escrita
-          const vigenciaActual = record.fields[VIGENCIA_CONFIG.vigenciaFieldName] || record.fields["Vigencia Exámenes"] || "";
-          if (vigenciaActual.trim()) {
-            totalSkip++;
-            continue;
-          }
-
           // Verificar si tiene adjuntos
           let tieneAdjuntos = false;
           for (const val of Object.values(record.fields)) {
@@ -2887,17 +2800,13 @@ app.post("/webhook/extraer-vigencias", async (req, res) => {
             }
           );
 
-          // Si cambiaron PDFs o es registro nuevo, procesar vigencias del propio record
-          let vigenciasFrescas = null;
           if (pdfFieldChanged || esRegistroNuevo) {
             const result = await procesarVigenciaRegistro(recordRes.data);
             console.log(`   ✅ Vigencias ID:${result.procesoId} → ${result.status} (${result.pdfs || 0} PDFs)`);
-            vigenciasFrescas = result.vigencias ?? null;
           }
 
-          // Siempre recalcular procesos previos + consolidado Vigencia Exámenes cuando algo cambió
           if (rutFieldChanged || esRegistroNuevo || pdfFieldChanged) {
-            const result = await procesarProcesosPreviosRegistro(recordRes.data, vigenciasFrescas);
+            const result = await procesarProcesosPreviosRegistro(recordRes.data);
             console.log(`   ✅ Previos ID:${result.procesoId} → ${result.previos || 0} previos, ${result.estado}`);
           }
         } catch (err) {
