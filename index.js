@@ -1881,10 +1881,11 @@ const nodemailer = require("nodemailer");
 const SYNC_API_KEY = process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_API_KEY;
 const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || "carlos.iturra@valuestrategyconsulting.com";
 
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587");
 const smtpTransporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: parseInt(process.env.SMTP_PORT || "587"),
-  secure: false,
+  port: SMTP_PORT,
+  secure: SMTP_PORT === 465,
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
