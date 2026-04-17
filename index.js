@@ -1758,7 +1758,7 @@ async function processPandaDocDocuments(body) {
       `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
       { headers: { Authorization: `Bearer ${airtableApiKey}` }, timeout: 15000 }
     );
-    const currentDocs = recordRes.data.fields?.Documentos;
+    const currentDocs = recordRes.data.fields?.["Documentos Pandadoc"];
     if (Array.isArray(currentDocs)) {
       keepAttachments = currentDocs
         .filter((att) => !webhookPattern.test(att.filename || ""))
@@ -1772,7 +1772,7 @@ async function processPandaDocDocuments(body) {
   try {
     await axios.patch(
       `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
-      { fields: { Documentos: [...keepAttachments, ...pdfAttachments] } },
+      { fields: { "Documentos Pandadoc": [...keepAttachments, ...pdfAttachments] } },
       {
         headers: {
           Authorization: `Bearer ${airtableApiKey}`,
