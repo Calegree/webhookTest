@@ -1962,7 +1962,7 @@ app.get("/test/pandadoc-details/:documentId", async (req, res) => {
 // ─── Notificación por email cuando candidato Desiste/Descarte ───────────────
 const nodemailer = require("nodemailer");
 const SYNC_API_KEY = process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_API_KEY;
-const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || "carlos.iturra@valuestrategyconsulting.com";
+const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || "carlos.iturra@valuestrategyconsulting.com,yasmin.filice@transearch.cl";
 
 const smtpTransporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
