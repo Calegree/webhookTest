@@ -1949,6 +1949,7 @@ const BASES_CONFIG = {
     watchFieldIds: ["fldI0SvMeKzynmyTR"],
     idField: "ID",
     nameField: "Nombre y Apellido",
+    cargoField: "Cargo",
     label: "Documentos",
   },
   psicolaborales: {
@@ -1959,7 +1960,8 @@ const BASES_CONFIG = {
     watchFieldIds: ["fldbd1IwPBbohCX8R"],
     idField: "Numero ID Del Proceso",
     nameField: "Nombre y Apellido del Candidato",
-    label: "Psicolaborales (One Page)",
+    cargoField: null,
+    label: "Evaluaciones Psicolaborales CODELCO",
   },
   examenes: {
     baseId: "appTDqX5xPNm7uUqU",
@@ -1969,24 +1971,39 @@ const BASES_CONFIG = {
     watchFieldIds: ["fldJzY53s5KHgrTMN"],
     idField: "ID",
     nameField: "Nombre y Apellido",
+    cargoField: "Cargo",
     label: "Exámenes Médicos",
   },
 };
 
-async function sendDesistEmail(origenLabel, triggerField, triggerValue, fields, idField, nameField) {
+// Buscar Cargo en BD Documentos cuando la base de origen no lo tiene
+async function buscarCargoEnDocumentos(procesoId) {
+  try {
+    const res = await axios.get(
+      `https://api.airtable.com/v0/appH4ByfDsfJFEp0l/tblwulQitACgXEdya`,
+      {
+        headers: { Authorization: `Bearer ${SYNC_API_KEY}` },
+        params: { filterByFormula: `{ID} = "${procesoId}"`, maxRecords: 1 },
+        timeout: 15000,
+      }
+    );
+    if (res.data.records.length > 0) {
+      return res.data.records[0].fields["Cargo"] || "";
+    }
+  } catch (err) {
+    console.warn(`   ⚠️ Error buscando cargo en Documentos: ${err.message}`);
+  }
+  return "";
+}
+
+async function sendDesistEmail(origenLabel, triggerValue, fields, idField, nameField, cargo) {
   const procesoId = fields[idField] || "(sin ID)";
   const nombre = fields[nameField] || "(sin nombre)";
-  const subject = `[Desiste/Descarte] ID ${procesoId} - ${nombre} (${origenLabel})`;
-  const html = `
-    <h3>Notificación de Desiste/Descarte</h3>
-    <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
-      <tr><td><b>Base origen</b></td><td>${origenLabel}</td></tr>
-      <tr><td><b>Campo</b></td><td>${triggerField}</td></tr>
-      <tr><td><b>Valor</b></td><td>${triggerValue}</td></tr>
-      <tr><td><b>ID Proceso</b></td><td>${procesoId}</td></tr>
-      <tr><td><b>Candidato</b></td><td>${nombre}</td></tr>
-    </table>
-  `;
+  const accion = /desiste/i.test(triggerValue) ? "Desiste" : "Descartado";
+  const subject = `Proceso ID ${procesoId} - ${cargo || "Sin cargo"} ${accion}`;
+  const html = `<p>Buenos días,</p>
+<p>Junto con saludar y esperando que estés bien, informo que la persona <b>${nombre}</b> <b>${accion}</b> del proceso <b>ID ${procesoId} - ${cargo || "Sin cargo"}</b>.</p>
+<p>Este mensaje fue disparado en la Base de datos <b>${origenLabel}</b>.</p>`;
   try {
     await smtpTransporter.sendMail({
       from: process.env.SMTP_USER,
@@ -2130,9 +2147,19 @@ app.post("/webhook/sync-desiste", async (req, res) => {
         }
 
         console.log(`   📧 Record ${recordId} → ${origenConfig.triggerField}="${valStr}"`);
+
+        // Obtener cargo: del registro si existe, o buscar en Documentos
+        let cargo = "";
+        if (origenConfig.cargoField) {
+          cargo = fields[origenConfig.cargoField] || "";
+        }
+        if (!cargo && procesoId) {
+          cargo = await buscarCargoEnDocumentos(procesoId);
+        }
+
         await sendDesistEmail(
-          origenConfig.label, origenConfig.triggerField, valStr,
-          fields, origenConfig.idField, origenConfig.nameField
+          origenConfig.label, valStr,
+          fields, origenConfig.idField, origenConfig.nameField, cargo
         );
 
         if (procesoId) {
