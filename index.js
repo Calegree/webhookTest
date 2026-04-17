@@ -1612,21 +1612,37 @@ async function processPandaDocDocuments(body) {
 
     const hvcLabel = `${prefix}HDVC${suffix}.pdf`;
 
-    // Generar portada HVC + documento con logo
+    // Generar portada HVC + documento original (sin logo)
     const hvcCoverBytes = await buildHvcCoverPage();
-    const hvcWithLogo = await generateCombinedPdfWithLogo([classified.hvc], logoBytes);
-
-    // Combinar portada + HVC en un solo PDF
     const hvcDoc = await PDFLib.create();
     const hvcCoverPdf = await PDFLib.load(hvcCoverBytes);
     const hvcCoverPages = await hvcDoc.copyPages(hvcCoverPdf, hvcCoverPdf.getPageIndices());
     for (const p of hvcCoverPages) hvcDoc.addPage(p);
-    const hvcContentPdf = await PDFLib.load(hvcWithLogo);
-    const hvcContentPages = await hvcDoc.copyPages(hvcContentPdf, hvcContentPdf.getPageIndices());
-    for (const p of hvcContentPages) hvcDoc.addPage(p);
+
+    // Agregar documento original sin modificar
+    const hvcHeader = classified.hvc.buffer.slice(0, 4).toString("hex");
+    if (hvcHeader === "25504446") {
+      // Es PDF: copiar páginas directamente
+      const hvcSrc = await PDFLib.load(classified.hvc.buffer, { ignoreEncryption: true });
+      const hvcSrcPages = await hvcDoc.copyPages(hvcSrc, hvcSrc.getPageIndices());
+      for (const p of hvcSrcPages) hvcDoc.addPage(p);
+    } else {
+      // Es imagen: embeber en una página
+      const page = hvcDoc.addPage([612, 792]);
+      let img;
+      if (hvcHeader.startsWith("89504e47")) {
+        img = await hvcDoc.embedPng(classified.hvc.buffer);
+      } else {
+        img = await hvcDoc.embedJpg(classified.hvc.buffer);
+      }
+      const scale = Math.min(612 / img.width, 792 / img.height, 1);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      page.drawImage(img, { x: (612 - w) / 2, y: (792 - h) / 2, width: w, height: h });
+    }
 
     generatedPdfs.push({ filename: hvcLabel, buffer: Buffer.from(await hvcDoc.save()) });
-    console.log(`📄 ${hvcLabel} generado (portada + HVC)`);
+    console.log(`📄 ${hvcLabel} generado (portada + documento original)`);
   }
   for (let i = 0; i < classified.otros.length; i++) {
     const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
