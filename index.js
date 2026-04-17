@@ -911,6 +911,7 @@ app.get("/test/validate-hvc/:nombre", async (req, res) => {
 const { extractTituloData } = require("./lib/titulo-extractor");
 const { validarTitulo } = require("./lib/titulo-validators");
 const { autoRotateCarnet } = require("./lib/auto-rotate");
+const { extractExpirationDate } = require("./lib/expiration-extractor");
 const { listarUniversidades } = require("./lib/universidades");
 
 const TEST_TITULOS = {
@@ -1523,11 +1524,20 @@ async function processPandaDocDocuments(body) {
   const prefix = `${procesoId} - `;
   const suffix = ` - ${nombreCompleto}`;
 
+  let vencimientoCI = null;
+  let vencimientoLC = null;
+
   if (classified.ciFront || classified.ciBack) {
     const ciFiles = [];
     for (const ci of [classified.ciFront, classified.ciBack].filter(Boolean)) {
       const rotated = await autoRotateCarnet(ci.buffer);
       ciFiles.push({ ...ci, buffer: rotated });
+    }
+    // Extraer fecha de vencimiento del frente del CI
+    if (ciFiles.length > 0) {
+      console.log(`   🔍 Extrayendo fecha de vencimiento del CI...`);
+      vencimientoCI = await extractExpirationDate(ciFiles[0].buffer);
+      console.log(`   📅 Vencimiento CI: ${vencimientoCI || "no detectado"}`);
     }
     const pdf = await generateSinglePageWithLogo(ciFiles, logoBytes);
     generatedPdfs.push({ filename: `${prefix}CI${suffix}.pdf`, buffer: pdf });
@@ -1565,6 +1575,12 @@ async function processPandaDocDocuments(body) {
     for (const lic of [classified.licFront, classified.licBack].filter(Boolean)) {
       const rotated = await autoRotateCarnet(lic.buffer);
       licFiles.push({ ...lic, buffer: rotated });
+    }
+    // Extraer fecha de vencimiento del frente de la LC
+    if (licFiles.length > 0) {
+      console.log(`   🔍 Extrayendo fecha de vencimiento de la LC...`);
+      vencimientoLC = await extractExpirationDate(licFiles[0].buffer);
+      console.log(`   📅 Vencimiento LC: ${vencimientoLC || "no detectado"}`);
     }
     const pdf = await generateSinglePageWithLogo(licFiles, logoBytes);
     generatedPdfs.push({ filename: `${prefix}LC${suffix}.pdf`, buffer: pdf });
@@ -1766,6 +1782,29 @@ async function processPandaDocDocuments(body) {
       }
     );
     console.log("🎉 [PANDADOC-DOCS] PDFs subidos a Airtable exitosamente");
+
+    // Escribir fechas de vencimiento si se extrajeron
+    if (vencimientoCI || vencimientoLC) {
+      const vencFields = {};
+      if (vencimientoCI) vencFields["Vencimiento CI"] = vencimientoCI;
+      if (vencimientoLC) vencFields["Vencimiento LC"] = vencimientoLC;
+      try {
+        await axios.patch(
+          `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableId}/${recordId}`,
+          { fields: vencFields },
+          {
+            headers: {
+              Authorization: `Bearer ${airtableApiKey}`,
+              "Content-Type": "application/json",
+            },
+            timeout: 15000,
+          }
+        );
+        console.log(`📅 Vencimientos guardados: CI=${vencimientoCI || "-"} LC=${vencimientoLC || "-"}`);
+      } catch (err) {
+        console.warn(`⚠️ Error guardando vencimientos: ${err.response?.data?.error?.message || err.message}`);
+      }
+    }
   } catch (err) {
     console.error("❌ Error subiendo a Airtable:", err.response?.data || err.message);
   }
