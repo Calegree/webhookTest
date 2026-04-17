@@ -1589,6 +1589,7 @@ async function processPandaDocDocuments(body) {
   if (classified.hvc) {
     // Validar HVC automáticamente contra el Registro Civil
     let hvcValidado = false;
+    let rcPdfBuffer = null;
     try {
       console.log(`   🔍 Validando HVC contra Registro Civil...`);
       const extracted = await extractLicenseData(classified.hvc.buffer);
@@ -1599,7 +1600,8 @@ async function processPandaDocDocuments(body) {
         console.log(`   📋 Resultado RC: ${verificacion.mensaje}`);
         if (verificacion.valido === true) {
           hvcValidado = true;
-          console.log(`   ✅ HVC VALIDADO`);
+          rcPdfBuffer = verificacion.pdfBuffer;
+          console.log(`   ✅ HVC VALIDADO${rcPdfBuffer ? ` (PDF RC: ${rcPdfBuffer.length} bytes)` : " (sin PDF RC)"}`);
         } else {
           console.log(`   ❌ HVC no validado`);
         }
@@ -1611,23 +1613,15 @@ async function processPandaDocDocuments(body) {
     }
 
     const hvcLabel = `${prefix}HDVC${suffix}.pdf`;
-
-    // Generar portada HVC + documento original (sin logo)
-    const hvcCoverBytes = await buildHvcCoverPage();
     const hvcDoc = await PDFLib.create();
-    const hvcCoverPdf = await PDFLib.load(hvcCoverBytes);
-    const hvcCoverPages = await hvcDoc.copyPages(hvcCoverPdf, hvcCoverPdf.getPageIndices());
-    for (const p of hvcCoverPages) hvcDoc.addPage(p);
 
-    // Agregar documento original sin modificar
+    // 1. Documento(s) del candidato (original, sin logo)
     const hvcHeader = classified.hvc.buffer.slice(0, 4).toString("hex");
     if (hvcHeader === "25504446") {
-      // Es PDF: copiar páginas directamente
       const hvcSrc = await PDFLib.load(classified.hvc.buffer, { ignoreEncryption: true });
       const hvcSrcPages = await hvcDoc.copyPages(hvcSrc, hvcSrc.getPageIndices());
       for (const p of hvcSrcPages) hvcDoc.addPage(p);
     } else {
-      // Es imagen: embeber en una página
       const page = hvcDoc.addPage([612, 792]);
       let img;
       if (hvcHeader.startsWith("89504e47")) {
@@ -1640,9 +1634,29 @@ async function processPandaDocDocuments(body) {
       const h = img.height * scale;
       page.drawImage(img, { x: (612 - w) / 2, y: (792 - h) / 2, width: w, height: h });
     }
+    console.log(`   📄 Documento candidato agregado`);
+
+    // 2. Portada
+    const hvcCoverBytes = await buildHvcCoverPage();
+    const hvcCoverPdf = await PDFLib.load(hvcCoverBytes);
+    const hvcCoverPages = await hvcDoc.copyPages(hvcCoverPdf, hvcCoverPdf.getPageIndices());
+    for (const p of hvcCoverPages) hvcDoc.addPage(p);
+    console.log(`   📄 Portada agregada`);
+
+    // 3. PDF validado del Registro Civil (si se descargó)
+    if (rcPdfBuffer) {
+      try {
+        const rcPdf = await PDFLib.load(rcPdfBuffer, { ignoreEncryption: true });
+        const rcPages = await hvcDoc.copyPages(rcPdf, rcPdf.getPageIndices());
+        for (const p of rcPages) hvcDoc.addPage(p);
+        console.log(`   📄 PDF Registro Civil agregado (${rcPages.length} páginas)`);
+      } catch (err) {
+        console.warn(`   ⚠️ Error agregando PDF del RC: ${err.message}`);
+      }
+    }
 
     generatedPdfs.push({ filename: hvcLabel, buffer: Buffer.from(await hvcDoc.save()) });
-    console.log(`📄 ${hvcLabel} generado (portada + documento original)`);
+    console.log(`📄 ${hvcLabel} generado (candidato + portada${rcPdfBuffer ? " + RC validado" : ""})`);
   }
   for (let i = 0; i < classified.otros.length; i++) {
     const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
