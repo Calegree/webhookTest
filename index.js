@@ -1734,12 +1734,15 @@ async function processPandaDocDocuments(body) {
         }
       }
 
-      // Crear nuevo PDF excluyendo la página de collect files y la última página (Certificate of Signature)
-      const lastPageIndex = pageCount - 1;
+      // Crear nuevo PDF excluyendo: página de collect files + últimas 2 páginas (página en blanco + Certificate of Signature)
+      const excludePages = new Set();
+      if (collectPageIndex >= 0) excludePages.add(collectPageIndex);
+      excludePages.add(pageCount - 1); // Certificate of Signature
+      excludePages.add(pageCount - 2); // Página en blanco
       const cleanPdf = await PDFLib.create();
       const indicesToKeep = [];
       for (let i = 0; i < pageCount; i++) {
-        if (i !== collectPageIndex && i !== lastPageIndex) indicesToKeep.push(i);
+        if (!excludePages.has(i)) indicesToKeep.push(i);
       }
       const pagesToKeep = await cleanPdf.copyPages(srcPdf, indicesToKeep);
       for (const p of pagesToKeep) cleanPdf.addPage(p);
