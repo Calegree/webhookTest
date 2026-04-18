@@ -1528,16 +1528,16 @@ async function processPandaDocDocuments(body) {
   let vencimientoLC = null;
 
   if (classified.ciFront || classified.ciBack) {
+    // Extraer fecha de vencimiento del ORIGINAL (antes de rotar) para mejor OCR
+    if (classified.ciFront) {
+      console.log(`   🔍 Extrayendo fecha de vencimiento del CI...`);
+      vencimientoCI = await extractExpirationDate(classified.ciFront.buffer);
+      console.log(`   📅 Vencimiento CI: ${vencimientoCI || "no detectado"}`);
+    }
     const ciFiles = [];
     for (const ci of [classified.ciFront, classified.ciBack].filter(Boolean)) {
       const rotated = await autoRotateCarnet(ci.buffer);
       ciFiles.push({ ...ci, buffer: rotated });
-    }
-    // Extraer fecha de vencimiento del frente del CI
-    if (ciFiles.length > 0) {
-      console.log(`   🔍 Extrayendo fecha de vencimiento del CI...`);
-      vencimientoCI = await extractExpirationDate(ciFiles[0].buffer);
-      console.log(`   📅 Vencimiento CI: ${vencimientoCI || "no detectado"}`);
     }
     const pdf = await generateSinglePageWithLogo(ciFiles, logoBytes);
     generatedPdfs.push({ filename: `${prefix}CI${suffix}.pdf`, buffer: pdf });
@@ -1571,16 +1571,16 @@ async function processPandaDocDocuments(body) {
     console.log(`📄 ${prefix}VT${suffix}.pdf generado (solo título)`);
   }
   if (classified.licFront || classified.licBack) {
+    // Extraer fecha de vencimiento del ORIGINAL (antes de rotar)
+    if (classified.licFront) {
+      console.log(`   🔍 Extrayendo fecha de vencimiento de la LC...`);
+      vencimientoLC = await extractExpirationDate(classified.licFront.buffer);
+      console.log(`   📅 Vencimiento LC: ${vencimientoLC || "no detectado"}`);
+    }
     const licFiles = [];
     for (const lic of [classified.licFront, classified.licBack].filter(Boolean)) {
       const rotated = await autoRotateCarnet(lic.buffer);
       licFiles.push({ ...lic, buffer: rotated });
-    }
-    // Extraer fecha de vencimiento del frente de la LC
-    if (licFiles.length > 0) {
-      console.log(`   🔍 Extrayendo fecha de vencimiento de la LC...`);
-      vencimientoLC = await extractExpirationDate(licFiles[0].buffer);
-      console.log(`   📅 Vencimiento LC: ${vencimientoLC || "no detectado"}`);
     }
     const pdf = await generateSinglePageWithLogo(licFiles, logoBytes);
     generatedPdfs.push({ filename: `${prefix}LC${suffix}.pdf`, buffer: pdf });
