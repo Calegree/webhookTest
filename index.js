@@ -1212,7 +1212,34 @@ async function generateCombinedPdfWithLogo(files, logoBytes) {
 
 // Clasifica archivos según el nombre del campo de PandaDoc
 // Los campos Collect files vienen como "Haz clic para subir un archivo (CI)", "(LC)", "(Título)", "(HVC)"
-// Para CI y LC que aparecen 2 veces: el primero es frente, el segundo es reverso
+// Detecta si un archivo es frente o reverso usando fieldName + fileName.
+// Devuelve "front", "back" o null si no se puede determinar por texto.
+function detectCardSide(file) {
+  const name = `${file.fieldName || ""} ${file.fileName || ""}`.toLowerCase();
+  if (/reverso|anverso\s*no|atr[aá]s|\bback\b|posterior|dorso|vuelta/i.test(name)) return "back";
+  if (/\bfrente\b|anverso|delantero|\bcara\b|\bfront\b/i.test(name)) return "front";
+  return null;
+}
+
+// Asigna un archivo a slot front/back del resultado. Si la detección por texto
+// falla, usa orden: el primer archivo del tipo es frente, el segundo es reverso.
+function assignCardSide(result, file, frontKey, backKey, label) {
+  const side = detectCardSide(file);
+  if (side === "front") {
+    result[frontKey] = file;
+    console.log(`    → ${label} Frente (por nombre)`);
+  } else if (side === "back") {
+    result[backKey] = file;
+    console.log(`    → ${label} Reverso (por nombre)`);
+  } else if (!result[frontKey]) {
+    result[frontKey] = file;
+    console.log(`    → ${label} Frente (por orden)`);
+  } else {
+    result[backKey] = file;
+    console.log(`    → ${label} Reverso (por orden)`);
+  }
+}
+
 function classifyDocFiles(files) {
   const result = {
     ciFront: null, ciBack: null, titulo: null,
@@ -1221,29 +1248,17 @@ function classifyDocFiles(files) {
 
   for (const file of files) {
     const name = (file.fieldName || "").toLowerCase();
-    console.log(`  📂 Clasificando: "${file.fieldName}"`);
+    console.log(`  📂 Clasificando: "${file.fieldName}" / fileName="${file.fileName || ""}"`);
 
     // Patrones para campos PandaDoc: "(CI)", "(LC)", "(Título)", "(HVC)"
     // y también formatos descriptivos: "cédula frente", "licencia reverso", etc.
     if (/\(ci\)|c[eé]dula|identidad|carnet/i.test(name)) {
-      if (!result.ciFront) {
-        result.ciFront = file;
-        console.log(`    → CI Frente`);
-      } else {
-        result.ciBack = file;
-        console.log(`    → CI Reverso`);
-      }
+      assignCardSide(result, file, "ciFront", "ciBack", "CI");
     } else if (/\(t[ií]tulo\)|t[ií]tulo/i.test(name)) {
       result.titulo = file;
       console.log(`    → Título`);
     } else if (/\(lc\)|licencia/i.test(name)) {
-      if (!result.licFront) {
-        result.licFront = file;
-        console.log(`    → Licencia Frente`);
-      } else {
-        result.licBack = file;
-        console.log(`    → Licencia Reverso`);
-      }
+      assignCardSide(result, file, "licFront", "licBack", "Licencia");
     } else if (/\(hvc\)|hoja\s*de\s*vida|conductor/i.test(name)) {
       result.hvc = file;
       console.log(`    → Hoja de Vida Conductor`);
