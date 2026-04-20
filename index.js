@@ -1222,7 +1222,8 @@ function detectCardSide(file) {
 }
 
 // Asigna un archivo a slot front/back del resultado. Si la detección por texto
-// falla, usa orden: el primer archivo del tipo es frente, el segundo es reverso.
+// falla, usa orden: PandaDoc entrega reverso primero, entonces el primer archivo
+// del tipo es reverso y el segundo es frente.
 function assignCardSide(result, file, frontKey, backKey, label) {
   const side = detectCardSide(file);
   if (side === "front") {
@@ -1231,13 +1232,23 @@ function assignCardSide(result, file, frontKey, backKey, label) {
   } else if (side === "back") {
     result[backKey] = file;
     console.log(`    → ${label} Reverso (por nombre)`);
-  } else if (!result[frontKey]) {
-    result[frontKey] = file;
-    console.log(`    → ${label} Frente (por orden)`);
-  } else {
+  } else if (!result[backKey]) {
     result[backKey] = file;
     console.log(`    → ${label} Reverso (por orden)`);
+  } else {
+    result[frontKey] = file;
+    console.log(`    → ${label} Frente (por orden)`);
   }
+}
+
+// Intenta extraer fecha de vencimiento probando ambos buffers (back primero,
+// porque la MRZ del CI chileno está ahí). Devuelve null si ninguno funciona.
+async function extractExpirationFromBothSides(back, front) {
+  for (const file of [back, front].filter(Boolean)) {
+    const fecha = await extractExpirationDate(file.buffer);
+    if (fecha) return fecha;
+  }
+  return null;
 }
 
 function classifyDocFiles(files) {
@@ -1543,12 +1554,12 @@ async function processPandaDocDocuments(body) {
   let vencimientoLC = null;
 
   if (classified.ciFront || classified.ciBack) {
-    // Extraer fecha de vencimiento del ORIGINAL (antes de rotar) para mejor OCR
-    if (classified.ciFront) {
-      console.log(`   🔍 Extrayendo fecha de vencimiento del CI...`);
-      vencimientoCI = await extractExpirationDate(classified.ciFront.buffer);
-      console.log(`   📅 Vencimiento CI: ${vencimientoCI || "no detectado"}`);
-    }
+    // Extraer fecha de vencimiento del ORIGINAL (antes de rotar) para mejor OCR.
+    // Probamos ambos lados porque la MRZ está en el reverso pero el texto
+    // "FECHA VENC" está en el frente.
+    console.log(`   🔍 Extrayendo fecha de vencimiento del CI...`);
+    vencimientoCI = await extractExpirationFromBothSides(classified.ciBack, classified.ciFront);
+    console.log(`   📅 Vencimiento CI: ${vencimientoCI || "no detectado"}`);
     const ciFiles = [];
     for (const ci of [classified.ciFront, classified.ciBack].filter(Boolean)) {
       const rotated = await autoRotateCarnet(ci.buffer);
@@ -1586,12 +1597,10 @@ async function processPandaDocDocuments(body) {
     console.log(`📄 ${prefix}VT${suffix}.pdf generado (solo título)`);
   }
   if (classified.licFront || classified.licBack) {
-    // Extraer fecha de vencimiento del ORIGINAL (antes de rotar)
-    if (classified.licFront) {
-      console.log(`   🔍 Extrayendo fecha de vencimiento de la LC...`);
-      vencimientoLC = await extractExpirationDate(classified.licFront.buffer);
-      console.log(`   📅 Vencimiento LC: ${vencimientoLC || "no detectado"}`);
-    }
+    // Extraer fecha de vencimiento del ORIGINAL (antes de rotar), probando ambos lados.
+    console.log(`   🔍 Extrayendo fecha de vencimiento de la LC...`);
+    vencimientoLC = await extractExpirationFromBothSides(classified.licBack, classified.licFront);
+    console.log(`   📅 Vencimiento LC: ${vencimientoLC || "no detectado"}`);
     const licFiles = [];
     for (const lic of [classified.licFront, classified.licBack].filter(Boolean)) {
       const rotated = await autoRotateCarnet(lic.buffer);
