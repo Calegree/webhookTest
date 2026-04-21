@@ -1761,14 +1761,16 @@ async function processPandaDocDocuments(body) {
       }
 
       // Crear nuevo PDF excluyendo: página de collect files + últimas páginas en blanco + Certificate of Signature
-      // Para Declaración Enviada (C/CT) el documento trae estructura distinta: la penúltima y
-      // antepenúltima son contenido real, no páginas en blanco, así que no se remueven.
+      // Para Declaración Enviada (C/CT) el documento trae estructura distinta: la penúltima y la
+      // 4ª desde el final son contenido real (no se remueven) y la antepenúltima (pageCount-3) es blanco.
       const esCCT = estadoDocumentos === "Declaración Enviada (C/CT)";
       console.log(`   📋 Estado Documentos: "${estadoDocumentos}" → modo ${esCCT ? "C/CT" : "S/CT (default)"}`);
       const excludePages = new Set();
       if (collectPageIndex >= 0) excludePages.add(collectPageIndex);
       excludePages.add(pageCount - 1); // Certificate of Signature
-      if (!esCCT) {
+      if (esCCT) {
+        excludePages.add(pageCount - 3); // Página en blanco (antepenúltima, solo C/CT)
+      } else {
         excludePages.add(pageCount - 2); // Página en blanco (solo S/CT)
         excludePages.add(pageCount - 4); // Página en blanco (la cuarta desde el final, solo S/CT)
       }
