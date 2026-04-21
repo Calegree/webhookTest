@@ -1222,8 +1222,8 @@ function detectCardSide(file) {
 }
 
 // Asigna un archivo a slot front/back del resultado. Si la detección por texto
-// falla, usa orden: PandaDoc entrega reverso primero, entonces el primer archivo
-// del tipo es reverso y el segundo es frente.
+// falla, usa orden: PandaDoc entrega frente primero, entonces el primer archivo
+// del tipo es frente y el segundo es reverso.
 function assignCardSide(result, file, frontKey, backKey, label) {
   const side = detectCardSide(file);
   if (side === "front") {
@@ -1232,12 +1232,12 @@ function assignCardSide(result, file, frontKey, backKey, label) {
   } else if (side === "back") {
     result[backKey] = file;
     console.log(`    → ${label} Reverso (por nombre)`);
-  } else if (!result[backKey]) {
-    result[backKey] = file;
-    console.log(`    → ${label} Reverso (por orden)`);
-  } else {
+  } else if (!result[frontKey]) {
     result[frontKey] = file;
     console.log(`    → ${label} Frente (por orden)`);
+  } else {
+    result[backKey] = file;
+    console.log(`    → ${label} Reverso (por orden)`);
   }
 }
 
