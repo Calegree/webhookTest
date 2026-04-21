@@ -1504,6 +1504,7 @@ async function processPandaDocDocuments(body) {
   let recordId;
   let nombreCompleto = recipientName || "";
   let vtData = {};
+  let estadoDocumentos = "";
   try {
     const formula = recipientEmail
       ? `AND({ID} = "${procesoId}", LOWER({Correo}) = "${recipientEmail.toLowerCase()}")`
@@ -1522,6 +1523,7 @@ async function processPandaDocDocuments(body) {
       const fields = searchRes.data.records[0].fields || {};
       recordId = searchRes.data.records[0].id;
       nombreCompleto = fields["Nombre y Apellido"] || nombreCompleto;
+      estadoDocumentos = fields["Estado Documentos"] || "";
       // Guardar datos para la portada VT
       vtData = {
         nombre: nombreCompleto,
@@ -1759,11 +1761,17 @@ async function processPandaDocDocuments(body) {
       }
 
       // Crear nuevo PDF excluyendo: página de collect files + últimas páginas en blanco + Certificate of Signature
+      // Para Declaración Enviada (C/CT) el documento trae estructura distinta: la penúltima y
+      // antepenúltima son contenido real, no páginas en blanco, así que no se remueven.
+      const esCCT = estadoDocumentos === "Declaración Enviada (C/CT)";
+      console.log(`   📋 Estado Documentos: "${estadoDocumentos}" → modo ${esCCT ? "C/CT" : "S/CT (default)"}`);
       const excludePages = new Set();
       if (collectPageIndex >= 0) excludePages.add(collectPageIndex);
       excludePages.add(pageCount - 1); // Certificate of Signature
-      excludePages.add(pageCount - 2); // Página en blanco
-      excludePages.add(pageCount - 4); // Página en blanco (la cuarta desde el final)
+      if (!esCCT) {
+        excludePages.add(pageCount - 2); // Página en blanco (solo S/CT)
+        excludePages.add(pageCount - 4); // Página en blanco (la cuarta desde el final, solo S/CT)
+      }
       const cleanPdf = await PDFLib.create();
       const indicesToKeep = [];
       for (let i = 0; i < pageCount; i++) {
