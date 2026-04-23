@@ -910,7 +910,7 @@ app.get("/test/validate-hvc/:nombre", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const { extractTituloData } = require("./lib/titulo-extractor");
 const { validarTitulo } = require("./lib/titulo-validators");
-const { autoRotateCarnet } = require("./lib/auto-rotate");
+const { autoRotateCarnet, autoRotateDocument } = require("./lib/auto-rotate");
 const { extractExpirationDate } = require("./lib/expiration-extractor");
 const { listarUniversidades } = require("./lib/universidades");
 
@@ -1593,7 +1593,7 @@ async function processPandaDocDocuments(body) {
       console.warn(`   ⚠️ Error validando título: ${err.message}`);
     }
 
-    const tituloRotated = await autoRotateCarnet(classified.titulo.buffer);
+    const tituloRotated = await autoRotateDocument(classified.titulo.buffer);
     const tituloWithLogo = await generateCombinedPdfWithLogo([{ ...classified.titulo, buffer: tituloRotated }], logoBytes);
     generatedPdfs.push({ filename: `${prefix}VT${suffix}.pdf`, buffer: tituloWithLogo });
     console.log(`📄 ${prefix}VT${suffix}.pdf generado (solo título)`);
@@ -1648,13 +1648,10 @@ async function processPandaDocDocuments(body) {
       const hvcSrcPages = await hvcDoc.copyPages(hvcSrc, hvcSrc.getPageIndices());
       for (const p of hvcSrcPages) hvcDoc.addPage(p);
     } else {
+      // Imagen: rotar y embeber. autoRotateDocument siempre entrega PNG.
+      const hvcRotated = await autoRotateDocument(classified.hvc.buffer);
       const page = hvcDoc.addPage([612, 792]);
-      let img;
-      if (hvcHeader.startsWith("89504e47")) {
-        img = await hvcDoc.embedPng(classified.hvc.buffer);
-      } else {
-        img = await hvcDoc.embedJpg(classified.hvc.buffer);
-      }
+      const img = await hvcDoc.embedPng(hvcRotated);
       const scale = Math.min(612 / img.width, 792 / img.height, 1);
       const w = img.width * scale;
       const h = img.height * scale;
@@ -1685,7 +1682,8 @@ async function processPandaDocDocuments(body) {
     console.log(`📄 ${hvcLabel} generado (candidato + portada${rcPdfBuffer ? " + RC validado" : ""})`);
   }
   for (let i = 0; i < classified.otros.length; i++) {
-    const pdf = await generateCombinedPdfWithLogo([classified.otros[i]], logoBytes);
+    const otroRotated = await autoRotateDocument(classified.otros[i].buffer);
+    const pdf = await generateCombinedPdfWithLogo([{ ...classified.otros[i], buffer: otroRotated }], logoBytes);
     generatedPdfs.push({ filename: `${prefix}Otro_${i + 1}${suffix}.pdf`, buffer: pdf });
     console.log(`📄 ${prefix}Otro_${i + 1}${suffix}.pdf generado`);
   }
