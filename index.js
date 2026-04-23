@@ -1699,80 +1699,19 @@ async function processPandaDocDocuments(body) {
       const pageCount = srcPdf.getPageCount();
       console.log(`📄 PDF original: ${pageCount} páginas`);
 
-      // Detectar la página de "ADJUNTAR DOCUMENTOS" (collect files).
-      // El texto de PandaDoc está embebido con font encoding custom, no se puede leer directo.
-      // Heurística: la página de collect files es la primera página (después de las declaraciones)
-      // cuyo content stream principal es corto (~12k) seguida de páginas con streams muy cortos
-      // (<2k), que son las previsualizaciones de los archivos adjuntos.
-      // Las páginas de declaraciones tienen streams de 8k-50k.
-      const zlib = require("zlib");
-      let collectPageIndex = -1;
-
-      for (let i = 0; i < pageCount; i++) {
-        const page = srcPdf.getPage(i);
-        const contentsRef = page.node.get(PDFName.of("Contents"));
-        if (!contentsRef || contentsRef.constructor.name !== "PDFArray") continue;
-
-        let fullText = "";
-        for (let j = 0; j < contentsRef.size(); j++) {
-          const ref = contentsRef.get(j);
-          const stream = ref instanceof PDFRef ? page.node.context.lookup(ref) : ref;
-          try {
-            const raw = stream.contents;
-            if (raw) {
-              try { fullText += zlib.inflateSync(Buffer.from(raw)).toString("utf-8"); }
-              catch { fullText += Buffer.from(raw).toString("latin1"); }
-            }
-          } catch {}
-        }
-
-        // Buscar texto "ADJUNTAR" en el content stream o en XObjects
-        if (fullText.includes("ADJUNTAR") || fullText.includes("DOCUMENTO SOLICITADO")) {
-          collectPageIndex = i;
-          console.log(`🔍 Página de collect files detectada por texto: ${i + 1}`);
-          break;
-        }
-
-        // Heurística: detectar la página de collect files por su patrón
-        // Es la primera página cuyo stream tiene <15k y la siguiente tiene <2k
-        if (i > 5 && fullText.length < 15000 && i + 1 < pageCount) {
-          const nextPage = srcPdf.getPage(i + 1);
-          const nextContents = nextPage.node.get(PDFName.of("Contents"));
-          if (nextContents && nextContents.constructor.name === "PDFArray") {
-            let nextText = "";
-            for (let j = 0; j < nextContents.size(); j++) {
-              const ref = nextContents.get(j);
-              const stream = ref instanceof PDFRef ? nextPage.node.context.lookup(ref) : ref;
-              try {
-                const raw = stream.contents;
-                if (raw) {
-                  try { nextText += zlib.inflateSync(Buffer.from(raw)).toString("utf-8"); }
-                  catch { nextText += Buffer.from(raw).toString("latin1"); }
-                }
-              } catch {}
-            }
-            if (nextText.length < 2000) {
-              collectPageIndex = i;
-              console.log(`🔍 Página de collect files detectada por heurística: ${i + 1} (stream=${fullText.length}, siguiente=${nextText.length})`);
-              break;
-            }
-          }
-        }
-      }
-
-      // Crear nuevo PDF excluyendo: página de collect files + últimas páginas en blanco + Certificate of Signature
-      // Para Declaración Enviada (C/CT) el documento trae estructura distinta: la penúltima y la
-      // 4ª desde el final son contenido real (no se remueven) y la antepenúltima (pageCount-3) es blanco.
+      // Crear nuevo PDF excluyendo páginas por posición fija según el estado:
+      //   C/CT: última (Certificate of Signature), penúltima ("ADJUNTAR DOCUMENTOS"), antepenúltima (blanco)
+      //   S/CT: última (Certificate of Signature), penúltima (blanco), 4ª desde el final (blanco)
       const esCCT = estadoDocumentos === "Declaración Enviada (C/CT)";
       console.log(`   📋 Estado Documentos: "${estadoDocumentos}" → modo ${esCCT ? "C/CT" : "S/CT (default)"}`);
       const excludePages = new Set();
-      if (collectPageIndex >= 0) excludePages.add(collectPageIndex);
       excludePages.add(pageCount - 1); // Certificate of Signature
       if (esCCT) {
-        excludePages.add(pageCount - 3); // Página en blanco (antepenúltima, solo C/CT)
+        excludePages.add(pageCount - 2); // "ADJUNTAR DOCUMENTOS" (penúltima, solo C/CT)
+        excludePages.add(pageCount - 3); // Blanco (antepenúltima, solo C/CT)
       } else {
-        excludePages.add(pageCount - 2); // Página en blanco (solo S/CT)
-        excludePages.add(pageCount - 4); // Página en blanco (la cuarta desde el final, solo S/CT)
+        excludePages.add(pageCount - 2); // Blanco (penúltima, solo S/CT)
+        excludePages.add(pageCount - 4); // Blanco (4ª desde el final, solo S/CT)
       }
       const cleanPdf = await PDFLib.create();
       const indicesToKeep = [];
