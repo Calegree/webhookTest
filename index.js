@@ -1700,16 +1700,18 @@ async function processPandaDocDocuments(body) {
       console.log(`📄 PDF original: ${pageCount} páginas`);
 
       // Crear nuevo PDF excluyendo páginas por posición fija según el estado:
-      //   C/CT: última (Certificate of Signature), penúltima ("ADJUNTAR DOCUMENTOS"), antepenúltima (blanco)
-      //   S/CT: última (Certificate of Signature), penúltima (blanco), 4ª desde el final (blanco)
+      //   C/CT: última (blanco), antepenúltima (blanco), 4ª desde el final ("ADJUNTAR DOCUMENTOS");
+      //         la penúltima es el Certificate of Signature (ACEPTA) y se conserva.
+      //   S/CT: última (Certificate of Signature), penúltima (blanco), 4ª desde el final (blanco).
       const esCCT = estadoDocumentos === "Declaración Enviada (C/CT)";
       console.log(`   📋 Estado Documentos: "${estadoDocumentos}" → modo ${esCCT ? "C/CT" : "S/CT (default)"}`);
       const excludePages = new Set();
-      excludePages.add(pageCount - 1); // Certificate of Signature
       if (esCCT) {
-        excludePages.add(pageCount - 2); // "ADJUNTAR DOCUMENTOS" (penúltima, solo C/CT)
+        excludePages.add(pageCount - 1); // Blanco (última, solo C/CT)
         excludePages.add(pageCount - 3); // Blanco (antepenúltima, solo C/CT)
+        excludePages.add(pageCount - 4); // "ADJUNTAR DOCUMENTOS" (4ª desde el final, solo C/CT)
       } else {
+        excludePages.add(pageCount - 1); // Certificate of Signature (S/CT)
         excludePages.add(pageCount - 2); // Blanco (penúltima, solo S/CT)
         excludePages.add(pageCount - 4); // Blanco (4ª desde el final, solo S/CT)
       }
