@@ -1937,7 +1937,14 @@ app.get("/test/pandadoc-details/:documentId", async (req, res) => {
 // ─── Notificación por email cuando candidato Desiste/Descarte ───────────────
 const nodemailer = require("nodemailer");
 const SYNC_API_KEY = process.env.AIRTABLE_SYNC_API_KEY || process.env.AIRTABLE_API_KEY;
-const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || "carlos.iturra@valuestrategyconsulting.com,yasmin.filice@transearch.cl";
+const FIXED_RECIPIENTS = [
+  "carlos.iturra@valuestrategyconsulting.com",
+  "NGuti007@contratistas.codelco.cl",
+  "EMart025@contratistas.codelco.cl",
+  "LSilv027@contratistas.codelco.cl",
+  "DFoix001@contratistas.codelco.cl",
+  "YFili002@contratistas.codelco.cl",
+];
 
 const smtpTransporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
@@ -1959,6 +1966,7 @@ const BASES_CONFIG = {
     idField: "ID",
     nameField: "Nombre y Apellido",
     cargoField: "Cargo",
+    analistaEmailField: "Correo Analista",
     label: "Documentos",
   },
   psicolaborales: {
@@ -1970,6 +1978,7 @@ const BASES_CONFIG = {
     idField: "Numero ID Del Proceso",
     nameField: "Nombre y Apellido del Candidato",
     cargoField: null,
+    analistaEmailField: null,
     label: "Evaluaciones Psicolaborales CODELCO",
   },
   examenes: {
@@ -1981,6 +1990,7 @@ const BASES_CONFIG = {
     idField: "ID",
     nameField: "Nombre y Apellido",
     cargoField: "Cargo",
+    analistaEmailField: "Correo (from Analista)",
     label: "Exámenes Médicos",
   },
 };
@@ -2005,7 +2015,7 @@ async function buscarCargoEnDocumentos(procesoId) {
   return "";
 }
 
-async function sendDesistEmail(origenLabel, triggerValue, fields, idField, nameField, cargo) {
+async function sendDesistEmail(origenLabel, triggerValue, fields, idField, nameField, cargo, analistaEmail) {
   const procesoId = fields[idField] || "(sin ID)";
   const nombre = fields[nameField] || "(sin nombre)";
   const accion = /desiste/i.test(triggerValue) ? "Desiste" : "Descartado";
@@ -2013,14 +2023,19 @@ async function sendDesistEmail(origenLabel, triggerValue, fields, idField, nameF
   const html = `<p>Buenos días,</p>
 <p>Junto con saludar y esperando que estés bien, informo que la persona <b>${nombre}</b> <b>${accion}</b> del proceso <b>ID ${procesoId} - ${cargo || "Sin cargo"}</b>.</p>
 <p>Este mensaje fue disparado en la Base de datos <b>${origenLabel}</b>.</p>`;
+
+  const recipients = new Set(FIXED_RECIPIENTS);
+  if (analistaEmail) recipients.add(analistaEmail);
+  const to = [...recipients].join(",");
+
   try {
     await smtpTransporter.sendMail({
       from: process.env.SMTP_USER,
-      to: NOTIFICATION_EMAIL,
+      to,
       subject,
       html,
     });
-    console.log(`   📧 Email enviado a ${NOTIFICATION_EMAIL}`);
+    console.log(`   📧 Email enviado a ${to}`);
   } catch (err) {
     console.error(`   ❌ Error enviando email: ${err.message}`);
   }
@@ -2166,9 +2181,17 @@ app.post("/webhook/sync-desiste", async (req, res) => {
           cargo = await buscarCargoEnDocumentos(procesoId);
         }
 
+        // Obtener correo del analista a partir del lookup field (array)
+        let analistaEmail = "";
+        if (origenConfig.analistaEmailField) {
+          const v = fields[origenConfig.analistaEmailField];
+          if (Array.isArray(v)) analistaEmail = v.find((x) => typeof x === "string" && x.includes("@")) || "";
+          else if (typeof v === "string") analistaEmail = v;
+        }
+
         await sendDesistEmail(
           origenConfig.label, valStr,
-          fields, origenConfig.idField, origenConfig.nameField, cargo
+          fields, origenConfig.idField, origenConfig.nameField, cargo, analistaEmail
         );
 
         if (procesoId) {
