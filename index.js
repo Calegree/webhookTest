@@ -2018,10 +2018,12 @@ async function buscarCargoEnDocumentos(procesoId) {
 async function sendDesistEmail(origenLabel, triggerValue, fields, idField, nameField, cargo, analistaEmail) {
   const procesoId = fields[idField] || "(sin ID)";
   const nombre = fields[nameField] || "(sin nombre)";
-  const accion = /desiste/i.test(triggerValue) ? "Desiste" : "Descartado";
+  const esDesiste = /desiste/i.test(triggerValue);
+  const accion = esDesiste ? "Desiste" : "Descartado";
+  const verboFrase = esDesiste ? "Desiste" : "fue Descartado";
   const subject = `Proceso ID ${procesoId} - ${cargo || "Sin cargo"} ${accion}`;
   const html = `<p>Buenos días,</p>
-<p>Junto con saludar y esperando que estés bien, informo que la persona <b>${nombre}</b> <b>${accion}</b> del proceso <b>ID ${procesoId} - ${cargo || "Sin cargo"}</b>.</p>
+<p>Junto con saludar y esperando que estés bien, informo que la persona <b>${nombre}</b> <b>${verboFrase}</b> del proceso <b>ID ${procesoId} - ${cargo || "Sin cargo"}</b>.</p>
 <p>Este mensaje fue disparado en la Base de datos <b>${origenLabel}</b>.</p>`;
 
   const recipients = new Set(FIXED_RECIPIENTS);
