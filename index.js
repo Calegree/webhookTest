@@ -227,6 +227,40 @@ app.get("/tmp/:id.jpg", (req, res) => {
   res.send(imageBuffer);
 });
 
+// ─── Helpers de matching de nombres (robusto contra tildes, mayúsculas, nombres parciales) ─
+function normalizeName(s) {
+  return String(s == null ? "" : s)
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function nameWords(s) {
+  return normalizeName(s).split(" ").filter((w) => w.length >= 2);
+}
+
+// Match si todas las palabras del nombre más corto están en el más largo.
+// Tolera middle names extra/faltantes en cualquier dirección.
+function namesMatch(a, b) {
+  const wa = nameWords(a);
+  const wb = nameWords(b);
+  if (wa.length === 0 || wb.length === 0) return false;
+  const [small, big] = wa.length <= wb.length ? [wa, wb] : [wb, wa];
+  const bigSet = new Set(big);
+  return small.every((w) => bigSet.has(w));
+}
+
+// Score 0..1: porción de palabras únicas del input que aparecen en el candidato.
+// Usado solo para desempatar cuando 2+ candidatos pasan namesMatch.
+function nameMatchScore(input, candidate) {
+  const inputUniq = [...new Set(nameWords(input))];
+  if (inputUniq.length === 0) return 0;
+  const candSet = new Set(nameWords(candidate));
+  return inputUniq.filter((w) => candSet.has(w)).length / inputUniq.length;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /insert-photo
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,7 +269,7 @@ app.post("/insert-photo", async (req, res) => {
   const raw = req.body.data || req.body;
   const body = {};
   for (const [k, v] of Object.entries(raw)) {
-    body[k.trim()] = v;
+    body[k.trim()] = typeof v === "string" ? v.trim() : v;
   }
   let { presentation_id, numero_id_proceso, nombre_candidato } = body;
 
@@ -255,40 +289,67 @@ app.post("/insert-photo", async (req, res) => {
     const docTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS || "tblwulQitACgXEdya";
     const docApiKey = process.env.AIRTABLE_API_KEY_DOCUMENTS || AIRTABLE_API_KEY;
 
-    // 1) Buscar por ID + nombre exacto
-    let formula = `AND({ID} = "${numero_id_proceso}", {Nombre y Apellido} = "${nombre_candidato}")`;
     const searchOpts = {
       headers: { Authorization: `Bearer ${docApiKey}` },
       timeout: 15000,
     };
+
+    // 1) Match exacto por nombre (fast path para el caso normal)
+    let formula = `AND({ID} = "${numero_id_proceso}", {Nombre y Apellido} = "${nombre_candidato}")`;
     let searchRes = await axios.get(
       `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
-      { ...searchOpts, params: { filterByFormula: formula, maxRecords: 1 } }
+      { ...searchOpts, params: { filterByFormula: formula, maxRecords: 2 } }
     );
 
-    // 2) Si no encuentra, buscar por ID + apellidos parciales (FIND en Airtable)
-    if (searchRes.data.records.length === 0) {
-      const palabras = nombre_candidato.split(/\s+/).filter((p) => p.length >= 4);
-      if (palabras.length > 0) {
-        // Usar las últimas 2 palabras (apellidos) o todas si son pocas
-        const apellidos = palabras.slice(-2);
-        const findConditions = apellidos.map((p) => `FIND("${p}", {Nombre y Apellido})`).join(", ");
-        formula = `AND({ID} = "${numero_id_proceso}", ${findConditions})`;
-        console.log(`⚠️ No encontrado con nombre exacto, buscando con apellidos: ${apellidos.join(", ")}`);
-        searchRes = await axios.get(
-          `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
-          { ...searchOpts, params: { filterByFormula: formula, maxRecords: 5 } }
-        );
+    let record = null;
+
+    if (searchRes.data.records.length === 1) {
+      record = searchRes.data.records[0];
+      console.log(`✅ Match exacto: ${record.id}`);
+    } else {
+      // 2) Fallback: traer TODOS los del proceso y matchear por word-set en JS
+      console.log(`⚠️ Match exacto falló (${searchRes.data.records.length} resultados). Buscando por score…`);
+      searchRes = await axios.get(
+        `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
+        { ...searchOpts, params: { filterByFormula: `{ID}="${numero_id_proceso}"`, maxRecords: 100 } }
+      );
+      const todos = searchRes.data.records || [];
+      if (todos.length === 0) {
+        return res.status(404).json({
+          error: `No se encontraron registros con ID=${numero_id_proceso}`,
+        });
+      }
+
+      const matches = todos
+        .map((r) => ({ r, candidato: r.fields["Nombre y Apellido"] || "" }))
+        .filter((m) => namesMatch(nombre_candidato, m.candidato));
+
+      if (matches.length === 0) {
+        return res.status(404).json({
+          error: `Sin match para "${nombre_candidato}" en ID=${numero_id_proceso}`,
+          candidatos_en_proceso: todos.slice(0, 15).map((r) => r.fields["Nombre y Apellido"] || "(sin nombre)"),
+        });
+      }
+
+      if (matches.length === 1) {
+        record = matches[0].r;
+        console.log(`✅ Match único por word-set: "${matches[0].candidato}" → ${record.id}`);
+      } else {
+        // 2+ candidatos pasan el filtro: desempatar por score
+        const scored = matches
+          .map((m) => ({ ...m, score: nameMatchScore(nombre_candidato, m.candidato) }))
+          .sort((a, b) => b.score - a.score);
+        const tieAtTop = scored.filter((s) => s.score === scored[0].score);
+        if (tieAtTop.length > 1) {
+          return res.status(409).json({
+            error: `Match ambiguo para "${nombre_candidato}" en ID=${numero_id_proceso}`,
+            candidatos_empatados: tieAtTop.map((s) => s.candidato),
+          });
+        }
+        record = scored[0].r;
+        console.log(`✅ Match por score (${(scored[0].score * 100).toFixed(0)}%): "${scored[0].candidato}" → ${record.id}`);
       }
     }
-
-    if (searchRes.data.records.length === 0) {
-      return res.status(404).json({
-        error: `No se encontró registro con ID=${numero_id_proceso} y Nombre="${nombre_candidato}"`,
-      });
-    }
-
-    const record = searchRes.data.records[0];
     console.log(`✅ Registro encontrado: ${record.id}`);
 
     const carnetField = record.fields["Frente Carnet Extraido"];
