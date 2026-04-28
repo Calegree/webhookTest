@@ -227,38 +227,15 @@ app.get("/tmp/:id.jpg", (req, res) => {
   res.send(imageBuffer);
 });
 
-// ─── Helpers de matching de nombres (robusto contra tildes, mayúsculas, nombres parciales) ─
-function normalizeName(s) {
-  return String(s == null ? "" : s)
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+// Normaliza un RUT chileno: quita puntos, guion, espacios; uppercase. Tolera "20.347.911-5", "20347911-5", "20347911 5", etc.
+function normalizeRut(rut) {
+  if (!rut) return "";
+  return String(rut).replace(/[.\-\s]/g, "").toUpperCase();
 }
 
-function nameWords(s) {
-  return normalizeName(s).split(" ").filter((w) => w.length >= 2);
-}
-
-// Match si todas las palabras del nombre más corto están en el más largo.
-// Tolera middle names extra/faltantes en cualquier dirección.
-function namesMatch(a, b) {
-  const wa = nameWords(a);
-  const wb = nameWords(b);
-  if (wa.length === 0 || wb.length === 0) return false;
-  const [small, big] = wa.length <= wb.length ? [wa, wb] : [wb, wa];
-  const bigSet = new Set(big);
-  return small.every((w) => bigSet.has(w));
-}
-
-// Score 0..1: porción de palabras únicas del input que aparecen en el candidato.
-// Usado solo para desempatar cuando 2+ candidatos pasan namesMatch.
-function nameMatchScore(input, candidate) {
-  const inputUniq = [...new Set(nameWords(input))];
-  if (inputUniq.length === 0) return 0;
-  const candSet = new Set(nameWords(candidate));
-  return inputUniq.filter((w) => candSet.has(w)).length / inputUniq.length;
+// Fragmento de fórmula Airtable que normaliza un campo Rut igual que normalizeRut() en JS.
+function airtableRutNormExpr(fieldName) {
+  return `UPPER(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE({${fieldName}},".",""),"-","")," ",""))`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,86 +248,48 @@ app.post("/insert-photo", async (req, res) => {
   for (const [k, v] of Object.entries(raw)) {
     body[k.trim()] = typeof v === "string" ? v.trim() : v;
   }
-  let { presentation_id, numero_id_proceso, nombre_candidato } = body;
+  let { presentation_id, numero_id_proceso, rut_candidato, nombre_candidato } = body;
 
   if (!presentation_id) {
     return res.status(400).json({ error: "Falta parámetro requerido: presentation_id" });
   }
 
-  if (!numero_id_proceso || !nombre_candidato) {
-    return res.status(400).json({ error: "Faltan parámetros requeridos: numero_id_proceso y nombre_candidato" });
+  if (!numero_id_proceso || !rut_candidato) {
+    return res.status(400).json({ error: "Faltan parámetros requeridos: numero_id_proceso y rut_candidato" });
   }
 
-  // ── 0. Buscar carnet en Documentos por ID proceso + nombre ──────────────
-  console.log(`🔍 Buscando carnet: ID=${numero_id_proceso}, Nombre=${nombre_candidato}`);
+  const rutNorm = normalizeRut(rut_candidato);
+  if (!rutNorm) {
+    return res.status(400).json({ error: `RUT inválido o vacío: "${rut_candidato}"` });
+  }
+
+  // ── 0. Buscar carnet en Documentos por ID + RUT normalizado ─────────────
+  console.log(`🔍 Buscando carnet: ID=${numero_id_proceso}, RUT=${rut_candidato}${nombre_candidato ? ` (${nombre_candidato})` : ""}`);
   let imageBuffer;
   try {
     const docBaseId = process.env.AIRTABLE_BASE_ID_DOCUMENTS || "appowVIrRtsBBMKUg";
     const docTableId = process.env.AIRTABLE_TABLE_ID_DOCUMENTS || "tblwulQitACgXEdya";
     const docApiKey = process.env.AIRTABLE_API_KEY_DOCUMENTS || AIRTABLE_API_KEY;
 
-    const searchOpts = {
-      headers: { Authorization: `Bearer ${docApiKey}` },
-      timeout: 15000,
-    };
-
-    // 1) Match exacto por nombre (fast path para el caso normal)
-    let formula = `AND({ID} = "${numero_id_proceso}", {Nombre y Apellido} = "${nombre_candidato}")`;
-    let searchRes = await axios.get(
+    // Normaliza el campo Rut en la fórmula igual que en JS, para tolerar diferencias de formato.
+    const formula = `AND({ID}="${numero_id_proceso}", ${airtableRutNormExpr("Rut")}="${rutNorm}")`;
+    const searchRes = await axios.get(
       `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
-      { ...searchOpts, params: { filterByFormula: formula, maxRecords: 2 } }
+      { headers: { Authorization: `Bearer ${docApiKey}` }, timeout: 15000, params: { filterByFormula: formula, maxRecords: 2 } }
     );
 
-    let record = null;
-
-    if (searchRes.data.records.length === 1) {
-      record = searchRes.data.records[0];
-      console.log(`✅ Match exacto: ${record.id}`);
-    } else {
-      // 2) Fallback: traer TODOS los del proceso y matchear por word-set en JS
-      console.log(`⚠️ Match exacto falló (${searchRes.data.records.length} resultados). Buscando por score…`);
-      searchRes = await axios.get(
-        `https://api.airtable.com/v0/${docBaseId}/${docTableId}`,
-        { ...searchOpts, params: { filterByFormula: `{ID}="${numero_id_proceso}"`, maxRecords: 100 } }
-      );
-      const todos = searchRes.data.records || [];
-      if (todos.length === 0) {
-        return res.status(404).json({
-          error: `No se encontraron registros con ID=${numero_id_proceso}`,
-        });
-      }
-
-      const matches = todos
-        .map((r) => ({ r, candidato: r.fields["Nombre y Apellido"] || "" }))
-        .filter((m) => namesMatch(nombre_candidato, m.candidato));
-
-      if (matches.length === 0) {
-        return res.status(404).json({
-          error: `Sin match para "${nombre_candidato}" en ID=${numero_id_proceso}`,
-          candidatos_en_proceso: todos.slice(0, 15).map((r) => r.fields["Nombre y Apellido"] || "(sin nombre)"),
-        });
-      }
-
-      if (matches.length === 1) {
-        record = matches[0].r;
-        console.log(`✅ Match único por word-set: "${matches[0].candidato}" → ${record.id}`);
-      } else {
-        // 2+ candidatos pasan el filtro: desempatar por score
-        const scored = matches
-          .map((m) => ({ ...m, score: nameMatchScore(nombre_candidato, m.candidato) }))
-          .sort((a, b) => b.score - a.score);
-        const tieAtTop = scored.filter((s) => s.score === scored[0].score);
-        if (tieAtTop.length > 1) {
-          return res.status(409).json({
-            error: `Match ambiguo para "${nombre_candidato}" en ID=${numero_id_proceso}`,
-            candidatos_empatados: tieAtTop.map((s) => s.candidato),
-          });
-        }
-        record = scored[0].r;
-        console.log(`✅ Match por score (${(scored[0].score * 100).toFixed(0)}%): "${scored[0].candidato}" → ${record.id}`);
-      }
+    if (searchRes.data.records.length === 0) {
+      return res.status(404).json({
+        error: `Sin registro con ID=${numero_id_proceso} y RUT=${rut_candidato} (normalizado: ${rutNorm})`,
+      });
     }
-    console.log(`✅ Registro encontrado: ${record.id}`);
+
+    if (searchRes.data.records.length > 1) {
+      console.warn(`⚠️ ${searchRes.data.records.length}+ registros con mismo ID+RUT, usando el primero`);
+    }
+
+    const record = searchRes.data.records[0];
+    console.log(`✅ Registro encontrado: ${record.id} (${record.fields["Nombre y Apellido"] || "?"})`);
 
     const carnetField = record.fields["Frente Carnet Extraido"];
     if (!carnetField || !Array.isArray(carnetField) || carnetField.length === 0) {
@@ -2062,12 +2001,6 @@ const BASES_CONFIG = {
   },
 };
 
-// Normaliza un RUT chileno para comparar entre bases (formatos distintos: "20.778.215-7" vs "13208567-6")
-function normalizeRut(rut) {
-  if (!rut) return "";
-  return String(rut).replace(/[.\-\s]/g, "").toUpperCase();
-}
-
 // Busca el correo del analista del registro equivalente en la base contraria, matcheando por ID o RUT normalizado.
 async function findAnalistaEmailInCounterpartBase(sourceFields, sourceConfig, counterpartConfig) {
   const id = String(sourceFields[sourceConfig.idField] || "").trim();
@@ -2077,7 +2010,7 @@ async function findAnalistaEmailInCounterpartBase(sourceFields, sourceConfig, co
 
   const conditions = [];
   if (id) conditions.push(`{${counterpartConfig.idField}}="${id}"`);
-  if (rutNorm) conditions.push(`UPPER(SUBSTITUTE(SUBSTITUTE({${counterpartConfig.rutField}},".",""),"-",""))="${rutNorm}"`);
+  if (rutNorm) conditions.push(`${airtableRutNormExpr(counterpartConfig.rutField)}="${rutNorm}"`);
   const formula = conditions.length === 1 ? conditions[0] : `OR(${conditions.join(",")})`;
 
   try {
