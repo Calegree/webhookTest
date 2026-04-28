@@ -2072,9 +2072,9 @@ async function sendDesistEmail(origenLabel, triggerValue, fields, idField, nameF
   const esDesiste = /desiste/i.test(triggerValue);
   const accion = esDesiste ? "Desiste" : "Descartado";
   const verboFrase = esDesiste ? "Desiste" : "fue Descartado";
-  const subject = `Proceso ID ${procesoId} - ${cargo || "Sin cargo"} ${accion}`;
+  const subject = `${accion.toUpperCase()} - Proceso ID ${procesoId} - ${cargo || "Sin cargo"}`;
   const html = `<p>Buenos días,</p>
-<p>Junto con saludar y esperando que estés bien, informo que la persona <b>${nombre}</b> <b>${verboFrase}</b> del proceso <b>ID ${procesoId} - ${cargo || "Sin cargo"}</b>.</p>
+<p>Junto con saludar y esperando que estés bien, informo que la persona <b>${nombre}</b> <b style="color:#d32f2f">${verboFrase}</b> del proceso <b>ID ${procesoId} - ${cargo || "Sin cargo"}</b>.</p>
 <p>Este mensaje fue disparado en la Base de datos <b>${origenLabel}</b>.</p>`;
 
   const recipients = new Set(FIXED_RECIPIENTS);
