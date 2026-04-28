@@ -1504,7 +1504,7 @@ async function processPandaDocDocuments(body) {
   let recordId;
   let nombreCompleto = recipientName || "";
   let vtData = {};
-  let estadoDocumentos = "";
+  let tipoDeclaracion = "";
   try {
     const formula = recipientEmail
       ? `AND({ID} = "${procesoId}", LOWER({Correo}) = "${recipientEmail.toLowerCase()}")`
@@ -1523,7 +1523,10 @@ async function processPandaDocDocuments(body) {
       const fields = searchRes.data.records[0].fields || {};
       recordId = searchRes.data.records[0].id;
       nombreCompleto = fields["Nombre y Apellido"] || nombreCompleto;
-      estadoDocumentos = fields["Estado Documentos"] || "";
+      // "Tipo Declaracion" se estampa por automatización de Airtable cuando
+      // "Estado Documentos" pasa a Declaración Enviada (S/CT) o (C/CT) y no se
+      // sobrescribe cuando luego cambia a Declaración Completada.
+      tipoDeclaracion = fields["Tipo Declaracion"] || "";
       // Guardar datos para la portada VT
       vtData = {
         nombre: nombreCompleto,
@@ -1702,8 +1705,11 @@ async function processPandaDocDocuments(body) {
       // ADJUNTAR DOCUMENTOS se remueve. La diferencia es la posición exacta:
       //   C/CT: ACEPTA en pageCount-2, ADJUNTAR en pageCount-4, blancos en -1 y -3.
       //   S/CT: ACEPTA en pageCount-3, ADJUNTAR en pageCount-5, blancos en -1, -2 y -4.
-      const esCCT = estadoDocumentos === "Declaración Enviada (C/CT)";
-      console.log(`   📋 Estado Documentos: "${estadoDocumentos}" → modo ${esCCT ? "C/CT" : "S/CT (default)"}`);
+      const esCCT = tipoDeclaracion === "C/CT";
+      if (!tipoDeclaracion) {
+        console.warn(`   ⚠️ Tipo Declaracion vacío en Airtable, usando S/CT por defecto`);
+      }
+      console.log(`   📋 Tipo Declaracion: "${tipoDeclaracion || "(vacío)"}" → modo ${esCCT ? "C/CT" : "S/CT (default)"}`);
       const excludePages = new Set();
       if (esCCT) {
         excludePages.add(pageCount - 1); // Blanco (última, solo C/CT)
