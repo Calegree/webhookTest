@@ -1966,7 +1966,9 @@ const BASES_CONFIG = {
     idField: "ID",
     nameField: "Nombre y Apellido",
     cargoField: "Cargo",
+    rutField: "Rut",
     analistaEmailField: "Correo Analista",
+    counterpartKey: "examenes",
     label: "Documentos",
   },
   psicolaborales: {
@@ -1978,7 +1980,9 @@ const BASES_CONFIG = {
     idField: "Numero ID Del Proceso",
     nameField: "Nombre y Apellido del Candidato",
     cargoField: null,
+    rutField: null,
     analistaEmailField: null,
+    counterpartKey: null,
     label: "Evaluaciones Psicolaborales CODELCO",
   },
   examenes: {
@@ -1990,10 +1994,57 @@ const BASES_CONFIG = {
     idField: "ID",
     nameField: "Nombre y Apellido",
     cargoField: "Cargo",
+    rutField: "Rut",
     analistaEmailField: "Correo (from Analista)",
+    counterpartKey: "documentos",
     label: "Exámenes Médicos",
   },
 };
+
+// Normaliza un RUT chileno para comparar entre bases (formatos distintos: "20.778.215-7" vs "13208567-6")
+function normalizeRut(rut) {
+  if (!rut) return "";
+  return String(rut).replace(/[.\-\s]/g, "").toUpperCase();
+}
+
+// Busca el correo del analista del registro equivalente en la base contraria, matcheando por ID o RUT normalizado.
+async function findAnalistaEmailInCounterpartBase(sourceFields, sourceConfig, counterpartConfig) {
+  const id = String(sourceFields[sourceConfig.idField] || "").trim();
+  const rutRaw = sourceFields[sourceConfig.rutField] || "";
+  const rutNorm = normalizeRut(rutRaw);
+  if (!id && !rutNorm) return "";
+
+  const conditions = [];
+  if (id) conditions.push(`{${counterpartConfig.idField}}="${id}"`);
+  if (rutNorm) conditions.push(`UPPER(SUBSTITUTE(SUBSTITUTE({${counterpartConfig.rutField}},".",""),"-",""))="${rutNorm}"`);
+  const formula = conditions.length === 1 ? conditions[0] : `OR(${conditions.join(",")})`;
+
+  try {
+    const res = await axios.get(
+      `https://api.airtable.com/v0/${counterpartConfig.baseId}/${counterpartConfig.tableId}`,
+      {
+        headers: { Authorization: `Bearer ${SYNC_API_KEY}` },
+        params: { filterByFormula: formula, maxRecords: 1 },
+        timeout: 15000,
+      }
+    );
+    if (res.data.records.length === 0) {
+      console.log(`   ⚠️ Sin match en ${counterpartConfig.label} (ID=${id}, RUT=${rutRaw})`);
+      return "";
+    }
+    const matchedFields = res.data.records[0].fields;
+    const v = matchedFields[counterpartConfig.analistaEmailField];
+    let email = "";
+    if (Array.isArray(v)) email = v.find((x) => typeof x === "string" && x.includes("@")) || "";
+    else if (typeof v === "string") email = v;
+    if (email) console.log(`   🔗 Analista contraparte (${counterpartConfig.label}): ${email}`);
+    else console.log(`   ⚠️ Match en ${counterpartConfig.label} pero sin analista asignado`);
+    return email;
+  } catch (err) {
+    console.warn(`   ⚠️ Error buscando analista en ${counterpartConfig.label}: ${err.response?.data?.error?.message || err.message}`);
+    return "";
+  }
+}
 
 // Buscar Cargo en BD Documentos cuando la base de origen no lo tiene
 async function buscarCargoEnDocumentos(procesoId) {
@@ -2183,12 +2234,11 @@ app.post("/webhook/sync-desiste", async (req, res) => {
           cargo = await buscarCargoEnDocumentos(procesoId);
         }
 
-        // Obtener correo del analista a partir del lookup field (array)
+        // Obtener correo del analista de la base CONTRARIA (cross-lookup por ID/RUT)
         let analistaEmail = "";
-        if (origenConfig.analistaEmailField) {
-          const v = fields[origenConfig.analistaEmailField];
-          if (Array.isArray(v)) analistaEmail = v.find((x) => typeof x === "string" && x.includes("@")) || "";
-          else if (typeof v === "string") analistaEmail = v;
+        if (origenConfig.counterpartKey) {
+          const counterpartConfig = BASES_CONFIG[origenConfig.counterpartKey];
+          analistaEmail = await findAnalistaEmailInCounterpartBase(fields, origenConfig, counterpartConfig);
         }
 
         await sendDesistEmail(
