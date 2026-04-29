@@ -1213,14 +1213,14 @@ async function generateCombinedPdfWithLogo(files, logoBytes) {
 // Clasifica archivos según el nombre del campo de PandaDoc
 // Los campos Collect files vienen como "Haz clic para subir un archivo (CI)", "(LC)", "(Título)", "(HVC)"
 // Asigna un archivo a slot front/back por orden de llegada: el primer archivo
-// del tipo es frente, el segundo es reverso.
+// del tipo es reverso, el segundo es frente (PandaDoc entrega reverso primero).
 function assignCardSide(result, file, frontKey, backKey, label) {
-  if (!result[frontKey]) {
-    result[frontKey] = file;
-    console.log(`    → ${label} Frente (por orden)`);
-  } else {
+  if (!result[backKey]) {
     result[backKey] = file;
     console.log(`    → ${label} Reverso (por orden)`);
+  } else {
+    result[frontKey] = file;
+    console.log(`    → ${label} Frente (por orden)`);
   }
 }
 
