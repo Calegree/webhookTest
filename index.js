@@ -1212,27 +1212,10 @@ async function generateCombinedPdfWithLogo(files, logoBytes) {
 
 // Clasifica archivos según el nombre del campo de PandaDoc
 // Los campos Collect files vienen como "Haz clic para subir un archivo (CI)", "(LC)", "(Título)", "(HVC)"
-// Detecta si un archivo es frente o reverso usando fieldName + fileName.
-// Devuelve "front", "back" o null si no se puede determinar por texto.
-function detectCardSide(file) {
-  const name = `${file.fieldName || ""} ${file.fileName || ""}`.toLowerCase();
-  if (/reverso|anverso\s*no|atr[aá]s|\bback\b|posterior|dorso|vuelta/i.test(name)) return "back";
-  if (/\bfrente\b|anverso|delantero|\bcara\b|\bfront\b/i.test(name)) return "front";
-  return null;
-}
-
-// Asigna un archivo a slot front/back del resultado. Si la detección por texto
-// falla, usa orden: PandaDoc entrega frente primero, entonces el primer archivo
-// del tipo es frente y el segundo es reverso.
+// Asigna un archivo a slot front/back por orden de llegada: el primer archivo
+// del tipo es frente, el segundo es reverso.
 function assignCardSide(result, file, frontKey, backKey, label) {
-  const side = detectCardSide(file);
-  if (side === "front") {
-    result[frontKey] = file;
-    console.log(`    → ${label} Frente (por nombre)`);
-  } else if (side === "back") {
-    result[backKey] = file;
-    console.log(`    → ${label} Reverso (por nombre)`);
-  } else if (!result[frontKey]) {
+  if (!result[frontKey]) {
     result[frontKey] = file;
     console.log(`    → ${label} Frente (por orden)`);
   } else {
